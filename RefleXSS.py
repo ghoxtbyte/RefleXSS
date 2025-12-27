@@ -18,7 +18,7 @@ init(autoreset=True)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 CANARY = "hackedxss"
 
-# Default dangerous characters
+# Default dangerous characters 
 DEFAULT_PAYLOAD_CHARS = "\"><';)(&|\\{}[]"
 
 # Global Sets for Deduplication
@@ -31,7 +31,7 @@ class AsyncXSSScanner:
         self.args = args
         self.proxies = self.load_proxies()
         
-        
+        Semaphore initialized to None, will be created in run() loop
         self.sem = None 
         
         # Headers
@@ -59,7 +59,6 @@ class AsyncXSSScanner:
         return proxy_list
 
     def format_proxy(self, proxy_str):
-        # aiohttp accepts strings directly like "http://user:pass@host:port"
         if "://" not in proxy_str:
             return f"http://{proxy_str}"
         return proxy_str
@@ -70,9 +69,6 @@ class AsyncXSSScanner:
         return random.choice(self.proxies)
 
     def print_msg(self, text, type="info"):
-        """
-        Prints a message cleanly by clearing the current line.
-        """
         clear_line = "\r\033[K"
         
         if type == "info":
@@ -102,13 +98,9 @@ class AsyncXSSScanner:
         self.print_msg(message, type)
 
     async def make_request(self, session, url):
-        """
-        Async request handler with Semaphore for concurrency limiting.
-        """
-        async with self.sem: # Limit concurrent requests
+        async with self.sem: 
             try:
                 proxy = self.get_proxy()
-                # Create SSL context to ignore verification
                 ssl_ctx = ssl.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -120,7 +112,6 @@ class AsyncXSSScanner:
                     ssl=ssl_ctx,
                     allow_redirects=True
                 ) as response:
-                    # Read content immediately to release connection back to pool
                     text = await response.text(errors='ignore')
                     return response.status, str(response.url), text
             except Exception as e:
@@ -161,9 +152,6 @@ class AsyncXSSScanner:
             return []
 
         base_domain_root = self.get_base_domain_name(final_url)
-
-        # BS4 is synchronous, but HTML parsing is CPU bound and fast enough for text
-        # If extremely heavy, could run in executor, but inline is fine for standard usage.
         soup = BeautifulSoup(content, 'html.parser')
         links = set()
         
@@ -208,14 +196,13 @@ class AsyncXSSScanner:
         for param_name in query_params:
             dedupe_key = f"{path_identifier}:{param_name}"
             
-            # Logic check: No await between check and add, effectively atomic in async loop
             if dedupe_key in scanned_params:
                 continue
             scanned_params.add(dedupe_key)
             
             delimiter = "".join(random.choices(string.ascii_lowercase, k=6))
             
-            # --- MODE 1: WAF BYPASS (One by one) ---
+            # --- MODE 1: WAF BYPASS ---
             if self.args.bypass_waf:
                 self.log(f"WAF Bypass Mode: Testing param '{param_name}' on: {url}", type="info")
                 
@@ -250,9 +237,14 @@ class AsyncXSSScanner:
                                 if end_idx != -1:
                                     reflected_data = search_window[:end_idx]
                                     if char in reflected_data:
+                                        # Check if reflected char is escaped with backslash
+                                        char_idx_in_window = reflected_data.find(char)
+                                        if char_idx_in_window > 0 and reflected_data[char_idx_in_window - 1] == '\\':
+                                             continue # Escaped, ignore
+                                             
                                         self.report_vuln(target_url, param_name, f"Reflected: {char}")
 
-            # --- MODE 2: FAST BATCH (All at once) ---
+            # --- MODE 2: FAST BATCH ---
             else:
                 payload_body = f"{delimiter}{self.chars_to_test}{delimiter}"
                 full_payload = f"{CANARY}{payload_body}"
@@ -293,16 +285,24 @@ class AsyncXSSScanner:
                                 if char in reflected_segment:
                                     char_idx = reflected_segment.find(char)
                                     
+                                    # --- IGNORE ESCAPED CHARACTERS (e.g. \") ---
+                                    # If the character is preceded by a backslash, it's likely neutralized
+                                    if char_idx > 0 and reflected_segment[char_idx - 1] == '\\':
+                                        continue
+
+                                    # HTML Entity Check
                                     if char == '&':
                                         sub = reflected_segment[char_idx:]
                                         if entity_pattern_start.match(sub):
                                             continue 
-                                            
+                                    
+                                    # Semicolon Check
                                     if char == ';':
                                         pre = reflected_segment[:char_idx+1]
                                         if re.search(r'&([a-z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});$', pre):
                                             continue
 
+                                    # URL Encoding Check
                                     if char == '%':
                                         sub = reflected_segment[char_idx:]
                                         if re.match(r'%[0-9a-fA-F]{2}', sub):
@@ -338,13 +338,11 @@ class AsyncXSSScanner:
                 f.write(f"{url}\n")
 
     async def run(self):
-        # Initialize Semaphore HERE, inside the running event loop
+        # Semaphore created in the correct loop
         self.sem = asyncio.Semaphore(self.args.concurrency)
 
         urls_to_scan = []
 
-        # --- OPTIMIZATION START: Async Connection Pooling ---
-        # Limit connections to match concurrency to avoid OS errors on too many open files
         connector = aiohttp.TCPConnector(
             limit=self.args.concurrency + 10, 
             ttl_dns_cache=300,
@@ -352,7 +350,7 @@ class AsyncXSSScanner:
         )
         
         async with aiohttp.ClientSession(connector=connector, headers=self.headers) as session:
-            self.session = session # Temporary reference if needed
+            self.session = session 
 
             if self.args.url:
                 urls_to_scan.append(self.normalize_url(self.args.url))
@@ -376,7 +374,6 @@ class AsyncXSSScanner:
                         targets = [self.normalize_url(line.strip()) for line in f if line.strip()]
                         self.log(f"Crawling {len(targets)} targets...", type="info")
                         
-                        # Crawling Tasks
                         crawl_tasks = [self.extract_links(session, url) for url in targets]
                         crawl_results = await asyncio.gather(*crawl_tasks)
                         
@@ -391,7 +388,6 @@ class AsyncXSSScanner:
             if self.args.bypass_waf:
                 self.log("Running in WAF Bypass mode (Slower, High Accuracy)", type="good")
 
-            # --- SCANNING PHASE ---
             scan_tasks = []
             for url in unique_urls_to_scan:
                 scan_tasks.append(self.check_xss(session, url))
@@ -400,7 +396,6 @@ class AsyncXSSScanner:
                 total = len(scan_tasks)
                 completed = 0
                 
-                # Using as_completed to update progress bar
                 for future in asyncio.as_completed(scan_tasks):
                     await future
                     completed += 1
@@ -431,9 +426,7 @@ def parse_arguments():
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose mode (Show progress even in silent mode)')
     parser.add_argument('--proxy', help='Single proxy (e.g., http://127.0.0.1:8080)')
     parser.add_argument('--proxy-list', help='File containing list of proxies')
-    
     parser.add_argument('--concurrency', type=int, default=50, help='Max concurrent requests (default 50)')
-    
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout in seconds (default 10)')
     parser.add_argument('-c', '--custom-chars', help='Custom payload characters (overrides default). E.g: -c "<>\"\'"')
     parser.add_argument('--bypass-waf', action='store_true', help='Test characters one by one to detect WAF blocks (403)')
@@ -443,7 +436,6 @@ def parse_arguments():
 
 if __name__ == "__main__":
     try:
-        # Check for Windows specific asyncio policy (if needed)
         if sys.platform == 'win32':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -469,5 +461,4 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print(f"\n{Fore.YELLOW}Shutting down please wait...{Style.RESET_ALL}")
-        # Normally async shutdown is more complex, but sys.exit(0) works for script termination
         sys.exit(0)
