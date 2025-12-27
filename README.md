@@ -72,3 +72,6 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 [VULN] Potential XSS Found on param 'q': [http://example.com/search.php](http://example.com/search.php)... (Reflected: "><)
 [+] Scan completed.
 ```
+
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
