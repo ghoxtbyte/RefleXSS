@@ -31,7 +31,7 @@ class AsyncXSSScanner:
         self.args = args
         self.proxies = self.load_proxies()
         
-        # Concurrency Control (Semaphore replaces Thread Pool)
+        # Concurrency Control 
         self.sem = asyncio.Semaphore(self.args.concurrency)
         
         # Headers
@@ -108,7 +108,7 @@ class AsyncXSSScanner:
         async with self.sem: # Limit concurrent requests
             try:
                 proxy = self.get_proxy()
-                # Create SSL context to ignore verification (verify=False replacement)
+                # Create SSL context to ignore verification
                 ssl_ctx = ssl.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -429,7 +429,7 @@ def parse_arguments():
     parser.add_argument('--proxy', help='Single proxy (e.g., http://127.0.0.1:8080)')
     parser.add_argument('--proxy-list', help='File containing list of proxies')
     
-    # --- ASYNC OPTIMIZATION: Replaced -t with --concurrency ---
+    # --- ASYNC OPTIMIZATION ---
     parser.add_argument('--concurrency', type=int, default=50, help='Max concurrent requests (default 50)')
     
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout in seconds (default 10)')
