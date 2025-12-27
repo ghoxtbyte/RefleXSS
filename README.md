@@ -17,7 +17,7 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/YOUR_USERNAME/xss-scanner.git](https://github.com/YOUR_USERNAME/xss-scanner.git)
+   git clone https://github.com/ghoxtbyte/xss-scanner.git
    cd xss-scanner
 2. Install the required dependencies:
    ```bash
@@ -28,7 +28,7 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 **Basic Scan**
 * Scan a single URL for Reflected XSS:
   ```bash
-  python xss-scanner.py -u "[http://example.com/search.php?q=test](http://example.com/search.php?q=test)"
+  python xss-scanner.py -u "https://example.com/search.php?q=test&x="
 **Scan a List of URLs**
 * Load URLs from a file and scan them:
   ```bash
@@ -36,15 +36,15 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 **Crawl and Scan**
 * Crawl a target URL for links and scan discovered parameters:
   ```bash
-  python xss-scanner.py -uC "[http://example.com](http://example.com)"
+  python xss-scanner.py -uC "https://example.com"
 **WAF Bypass Mode**
 * Test characters one-by-one to identify which specific characters are triggering the WAF:
   ```bash
-  python xss-scanner.py -u "[http://example.com/search?q=test](http://example.com/search?q=test)" --bypass-waf
+  python xss-scanner.py -u "https://example.com/search?q=test](http://example.com/search?q=test" --bypass-waf
 **Strict Mode (Force)**
 * Only report a vulnerability if ALL custom characters are reflected (useful for confirming exploitability):
   ```bash
-  python xss-scanner.py -u "[http://example.com/page?id=1](http://example.com/page?id=1)" --custom-chars "'<>" --force
+  python xss-scanner.py -u "https://example.com/page?id=1&s=search" --custom-chars "'<>" --force
   
 ## ⚙️ Arguments
 
@@ -68,8 +68,8 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 ## 📝 Example Output
 ```bash
 [INFO] Starting scan on 1 URLs...
-[INFO] Testing param 'q' on: [http://example.com/search.php?q=hackedxss](http://example.com/search.php?q=hackedxss)...
-[VULN] Potential XSS Found on param 'q': [http://example.com/search.php](http://example.com/search.php)... (Reflected: "><)
+[INFO] Testing param 'q' on: https://example.com/search.php?q=hackedxss...
+[VULN] Potential XSS Found on param 'q': https://example.com/search.php... (Reflected: "><)
 [+] Scan completed.
 ```
 
