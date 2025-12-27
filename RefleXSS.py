@@ -31,7 +31,7 @@ class AsyncXSSScanner:
         self.args = args
         self.proxies = self.load_proxies()
         
-        Semaphore initialized to None, will be created in run() loop
+        # Semaphore initialized to None, will be created in run() loop
         self.sem = None 
         
         # Headers
