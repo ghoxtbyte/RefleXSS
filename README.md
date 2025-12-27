@@ -1,6 +1,6 @@
 # Advanced Reflected XSS Scanner
 
-A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XSS) scanner written in Python. It supports crawling, WAF bypassing, and custom payload injection with detailed reporting.
+A powerful, fully asynchronous, and context-aware Reflected Cross-Site Scripting (XSS) scanner written in Python. It supports crawling, WAF bypassing, and custom payload injection with detailed reporting.
 
 ## 🚀 Features
 
@@ -9,7 +9,7 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 - **WAF Bypass Mode**: Tests payload characters individually to identify and bypass Web Application Firewalls (403 filtering).
 - **Force Mode**: Strict verification that requires *all* injected characters to be reflected (reduces false positives).
 - **Context Analysis**: Checks for HTML entities and hex encoding to avoid false positives.
-- **Performance**: Multi-threaded architecture for fast scanning.
+- **Performance**: Asynchronous architecture (AsyncIO & AIOHTTP) for blazing fast, high-concurrency scanning.
 - **Crawler**: Built-in web crawler to extract links and parameters from target domains.
 - **Proxy Support**: Supports HTTP/HTTPS proxies and proxy lists.
 
@@ -32,7 +32,7 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 **Scan a List of URLs**
 * Load URLs from a file and scan them:
   ```bash
-  python xss-scanner.py -l urls.txt --threads 20
+  python xss-scanner.py -l urls.txt --concurrency 20
 **Crawl and Scan**
 * Crawl a target URL for links and scan discovered parameters:
   ```bash
@@ -44,7 +44,7 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 **Strict Mode (Force)**
 * Only report a vulnerability if ALL custom characters are reflected (useful for confirming exploitability):
   ```bash
-  python xss-scanner.py -u "https://example.com/page?id=1&s=search" --custom-chars "'<>" --force
+  python xss-scanner.py -u "https://example.com/page?id=1&s=search" --custom-chars '"<>' --force 
   
 ## ⚙️ Arguments
 
@@ -57,7 +57,7 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 | `-o, --output` | File to save vulnerable URLs. |
 | `-s, --silent` | Silent mode (only prints found vulnerabilities). |
 | `-v, --verbose` | Verbose mode (shows progress even in silent mode). |
-| `-t, --threads` | Number of threads to use (default: 10). |
+| `--concurrency` | Maximum number of concurrent requests (default: 50). |
 | `--timeout` | Request timeout in seconds (default: 10). |
 | `--proxy` | Single proxy (e.g., `http://127.0.0.1:8080`). |
 | `--proxy-list` | File containing a list of proxies. |
