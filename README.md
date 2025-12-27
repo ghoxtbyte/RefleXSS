@@ -40,7 +40,7 @@ A powerful, multi-threaded, and context-aware Reflected Cross-Site Scripting (XS
 **WAF Bypass Mode**
 * Test characters one-by-one to identify which specific characters are triggering the WAF:
   ```bash
-  python xss-scanner.py -u "https://example.com/search?q=test](http://example.com/search?q=test" --bypass-waf
+  python xss-scanner.py -u "https://example.com/search?q=test" --bypass-waf
 **Strict Mode (Force)**
 * Only report a vulnerability if ALL custom characters are reflected (useful for confirming exploitability):
   ```bash
