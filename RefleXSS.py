@@ -31,8 +31,8 @@ class AsyncXSSScanner:
         self.args = args
         self.proxies = self.load_proxies()
         
-        # Concurrency Control 
-        self.sem = asyncio.Semaphore(self.args.concurrency)
+        
+        self.sem = None 
         
         # Headers
         self.headers = {'User-Agent': USER_AGENT}
@@ -338,6 +338,9 @@ class AsyncXSSScanner:
                 f.write(f"{url}\n")
 
     async def run(self):
+        # Initialize Semaphore HERE, inside the running event loop
+        self.sem = asyncio.Semaphore(self.args.concurrency)
+
         urls_to_scan = []
 
         # --- OPTIMIZATION START: Async Connection Pooling ---
@@ -429,7 +432,6 @@ def parse_arguments():
     parser.add_argument('--proxy', help='Single proxy (e.g., http://127.0.0.1:8080)')
     parser.add_argument('--proxy-list', help='File containing list of proxies')
     
-    # --- ASYNC OPTIMIZATION ---
     parser.add_argument('--concurrency', type=int, default=50, help='Max concurrent requests (default 50)')
     
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout in seconds (default 10)')
