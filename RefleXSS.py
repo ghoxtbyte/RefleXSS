@@ -1,23 +1,18 @@
-#!/bin/python3
+#!/usr/bin/python3
 import argparse
-import requests
 import sys
-import urllib3
-import threading
+import asyncio
+import aiohttp
 import random
-import time
 import re
 import string
+import ssl
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode, urlunparse
 from bs4 import BeautifulSoup
 from colorama import Fore, Style, init
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Initialize Colorama
 init(autoreset=True)
-
-# Disable SSL Warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configuration
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -31,12 +26,17 @@ scanned_params = set()
 crawled_urls = set()
 vulnerable_urls = []
 
-class XSSScanner:
+class AsyncXSSScanner:
     def __init__(self, args):
         self.args = args
         self.proxies = self.load_proxies()
-        self.lock = threading.Lock()
         
+        # Concurrency Control (Semaphore replaces Thread Pool)
+        self.sem = asyncio.Semaphore(self.args.concurrency)
+        
+        # Headers
+        self.headers = {'User-Agent': USER_AGENT}
+
         if self.args.custom_chars:
             self.chars_to_test = self.args.custom_chars
         else:
@@ -59,23 +59,20 @@ class XSSScanner:
         return proxy_list
 
     def format_proxy(self, proxy_str):
+        # aiohttp accepts strings directly like "http://user:pass@host:port"
         if "://" not in proxy_str:
-            return {"http": f"http://{proxy_str}", "https": f"http://{proxy_str}"}
-        scheme = proxy_str.split("://")[0]
-        return {"http": proxy_str, "https": proxy_str}
+            return f"http://{proxy_str}"
+        return proxy_str
 
     def get_proxy(self):
         if not self.proxies:
             return None
         return random.choice(self.proxies)
 
-    
     def print_msg(self, text, type="info"):
         """
-        Prints a message cleanly by clearing the current line (removing progress bar artifacts),
-        printing the message, and forcing a newline. The progress bar will redraw on the next loop.
+        Prints a message cleanly by clearing the current line.
         """
-        # \r moves to start of line, \033[K clears the line
         clear_line = "\r\033[K"
         
         if type == "info":
@@ -96,55 +93,59 @@ class XSSScanner:
         sys.stdout.flush()
 
     def log(self, message, type="info"):
-        # Silent mode logic:
-        # If silent is ON, we only print VULN.
         if self.args.silent:
             if type == "vuln":
-                
                 sys.stdout.write(f"\r\033[K{message}\n")
                 sys.stdout.flush()
             return
 
         self.print_msg(message, type)
 
-    def make_request(self, url):
-        try:
-            proxy = self.get_proxy()
-            headers = {'User-Agent': USER_AGENT}
-            response = requests.get(
-                url, 
-                headers=headers, 
-                proxies=proxy, 
-                timeout=self.args.timeout,
-                verify=False,
-                allow_redirects=True
-            )
-            return response
-        except requests.exceptions.RequestException as e:
-            if not self.args.silent:
-                # Cleaner error message
-                err_msg = str(e).split(':')[-1].strip() if ':' in str(e) else str(e)
-                self.log(f"Connection error on {url}: {err_msg}", type="error")
-            return None
+    async def make_request(self, session, url):
+        """
+        Async request handler with Semaphore for concurrency limiting.
+        """
+        async with self.sem: # Limit concurrent requests
+            try:
+                proxy = self.get_proxy()
+                # Create SSL context to ignore verification (verify=False replacement)
+                ssl_ctx = ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+
+                async with session.get(
+                    url, 
+                    proxy=proxy, 
+                    timeout=aiohttp.ClientTimeout(total=self.args.timeout),
+                    ssl=ssl_ctx,
+                    allow_redirects=True
+                ) as response:
+                    # Read content immediately to release connection back to pool
+                    text = await response.text(errors='ignore')
+                    return response.status, str(response.url), text
+            except Exception as e:
+                if not self.args.silent:
+                    err_msg = str(e).split(':')[-1].strip() if ':' in str(e) else str(e)
+                    self.log(f"Connection error on {url}: {err_msg}", type="error")
+                return None, None, None
 
     def normalize_url(self, url):
         if not url.startswith('http://') and not url.startswith('https://'):
             return f'https://{url}'
         return url
 
-    # --- NEW HELPER FOR DOMAIN COMPARISON ---
     def get_base_domain_name(self, url):
-        netloc = urlparse(url).netloc
-        # Remove port if exists
-        if ':' in netloc:
-            netloc = netloc.split(':')[0]
-        # Remove www prefix for looser matching
-        if netloc.startswith('www.'):
-            return netloc[4:]
-        return netloc
+        try:
+            netloc = urlparse(url).netloc
+            if ':' in netloc:
+                netloc = netloc.split(':')[0]
+            if netloc.startswith('www.'):
+                return netloc[4:]
+            return netloc
+        except:
+            return ""
 
-    def extract_links(self, url):
-        # Deduplication check for the page being crawled
+    async def extract_links(self, session, url):
         if url in crawled_urls:
             return []
         
@@ -155,40 +156,33 @@ class XSSScanner:
             with open(self.args.output_crawl, 'a') as f:
                 f.write(url + '\n')
 
-        response = self.make_request(url)
-        if not response:
+        status, final_url, content = await self.make_request(session, url)
+        if not content:
             return []
 
-        final_url = response.url
-        
         base_domain_root = self.get_base_domain_name(final_url)
 
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # BS4 is synchronous, but HTML parsing is CPU bound and fast enough for text
+        # If extremely heavy, could run in executor, but inline is fine for standard usage.
+        soup = BeautifulSoup(content, 'html.parser')
         links = set()
         
         for tag in soup.find_all('a', href=True):
             href = tag['href'].strip() 
             
-            
             if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
                 continue
 
-            # Join relative URLs with the final URL from response
             full_url = urljoin(final_url, href)
             parsed = urlparse(full_url)
             
-            
             link_domain_root = self.get_base_domain_name(full_url)
             
-            # 1. Check if it belongs to the same domain (Root Domain Comparison)
             if link_domain_root == base_domain_root:
-                # 2. Check if it has a Query String (GET params)
                 if parsed.query:
-                    # 3. Deduplication logic:
                     q_params = parse_qs(parsed.query)
                     sorted_q = urlencode(q_params, doseq=True)
                     
-                    # Rebuild URL with sorted params for unique check
                     unique_url = urlunparse((
                         parsed.scheme, parsed.netloc, parsed.path,
                         parsed.params, sorted_q, parsed.fragment
@@ -202,9 +196,8 @@ class XSSScanner:
             
         return list(links)
 
-    def check_xss(self, url):
+    async def check_xss(self, session, url):
         parsed = urlparse(url)
-        # keep_blank_values=True ensures parameters like ?id= are NOT ignored
         query_params = parse_qs(parsed.query, keep_blank_values=True)
         
         if not query_params:
@@ -215,12 +208,11 @@ class XSSScanner:
         for param_name in query_params:
             dedupe_key = f"{path_identifier}:{param_name}"
             
-            with self.lock:
-                if dedupe_key in scanned_params:
-                    continue
-                scanned_params.add(dedupe_key)
+            # Logic check: No await between check and add, effectively atomic in async loop
+            if dedupe_key in scanned_params:
+                continue
+            scanned_params.add(dedupe_key)
             
-            # Generate a random delimiter (Bumper) to isolate our payload from surrounding HTML
             delimiter = "".join(random.choices(string.ascii_lowercase, k=6))
             
             # --- MODE 1: WAF BYPASS (One by one) ---
@@ -228,7 +220,6 @@ class XSSScanner:
                 self.log(f"WAF Bypass Mode: Testing param '{param_name}' on: {url}", type="info")
                 
                 for char in self.chars_to_test:
-                    # Payload: CANARY + delimiter + char + delimiter
                     payload_body = f"{delimiter}{char}{delimiter}"
                     full_payload = f"{CANARY}{payload_body}"
                     
@@ -241,13 +232,12 @@ class XSSScanner:
                         parsed.params, new_query, parsed.fragment
                     ))
 
-                    response = self.make_request(target_url)
+                    status, _, content = await self.make_request(session, target_url)
                     
-                    if response:
-                        if response.status_code == 403:
+                    if content is not None:
+                        if status == 403:
                             self.log(f"WAF 403 Forbidden detected for char '{char}' on {param_name}", type="waf")
                         else:
-                            content = response.text
                             start_marker = f"{CANARY}{delimiter}"
                             end_marker = delimiter
                             
@@ -264,7 +254,6 @@ class XSSScanner:
 
             # --- MODE 2: FAST BATCH (All at once) ---
             else:
-                # Payload: CANARY + delimiter + ALL_CHARS + delimiter
                 payload_body = f"{delimiter}{self.chars_to_test}{delimiter}"
                 full_payload = f"{CANARY}{payload_body}"
                 
@@ -279,20 +268,17 @@ class XSSScanner:
                 
                 self.log(f"Testing param '{param_name}' on: {target_url}", type="info")
                 
-                response = self.make_request(target_url)
+                status, _, content = await self.make_request(session, target_url)
                 
-                if response and CANARY in response.text:
+                if content and CANARY in content:
                     reflected_chars = []
-                    content = response.text
                     
-                    # 1. Find the Start Marker
                     start_marker = f"{CANARY}{delimiter}"
                     start_indices = [m.start() for m in re.finditer(re.escape(start_marker), content)]
                     
                     for start_idx in start_indices:
                         payload_start = start_idx + len(start_marker)
                         
-                        # 2. Look for the End Marker
                         window_len = len(self.chars_to_test) * 10 + 50
                         search_window = content[payload_start : payload_start + window_len]
                         
@@ -301,14 +287,12 @@ class XSSScanner:
                         if end_idx != -1:
                             reflected_segment = search_window[:end_idx]
                             
-                            # Regex for Entity Checking
                             entity_pattern_start = re.compile(r'&([a-z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});', re.IGNORECASE)
 
                             for char in self.chars_to_test:
                                 if char in reflected_segment:
                                     char_idx = reflected_segment.find(char)
                                     
-                                    # --- CONTEXT CHECKS ---
                                     if char == '&':
                                         sub = reflected_segment[char_idx:]
                                         if entity_pattern_start.match(sub):
@@ -330,16 +314,12 @@ class XSSScanner:
                     if reflected_chars:
                         reflected_str = "".join(reflected_chars)
                         
-                        # --- Force Mode Logic ---
                         if self.args.force:
-                            # Check if ALL chars (custom or default) are present in reflection
                             if set(reflected_chars) == set(self.chars_to_test):
                                 self.report_vuln(target_url, param_name, f"Reflected chars (FORCE): {reflected_str}")
                             else:
-                                # In force mode, we do NOT report partial reflections
                                 self.log(f"Partial reflection ignored by --force on {param_name} ({len(reflected_chars)}/{len(self.chars_to_test)} chars)", type="info")
                         else:
-                            # Standard behavior: Report if ANY char is reflected
                             self.report_vuln(target_url, param_name, f"Reflected chars: {reflected_str}")
                     else:
                         self.log(f"Canary reflected but chars filtered/encoded on {param_name}", type="info")
@@ -355,73 +335,86 @@ class XSSScanner:
         
         if self.args.output:
             with open(self.args.output, 'a') as f:
-                
                 f.write(f"{url}\n")
 
-    def run(self):
+    async def run(self):
         urls_to_scan = []
 
-        if self.args.url:
-            urls_to_scan.append(self.normalize_url(self.args.url))
-
-        if self.args.list:
-            try:
-                with open(self.args.list, 'r') as f:
-                    urls_to_scan.extend([self.normalize_url(line.strip()) for line in f if line.strip()])
-            except FileNotFoundError:
-                self.print_msg("URL list file not found!", type="error")
-                return
-
-        if self.args.url_crawl:
-            start_url = self.normalize_url(self.args.url_crawl)
-            links = self.extract_links(start_url)
-            urls_to_scan.extend(links)
-
-        if self.args.list_crawl:
-            try:
-                 with open(self.args.list_crawl, 'r') as f:
-                    targets = [self.normalize_url(line.strip()) for line in f if line.strip()]
-                    self.log(f"Crawling {len(targets)} targets...", type="info")
-                    with ThreadPoolExecutor(max_workers=5) as crawler_pool:
-                        future_to_url = {crawler_pool.submit(self.extract_links, url): url for url in targets}
-                        for future in as_completed(future_to_url):
-                            links = future.result()
-                            urls_to_scan.extend(links)
-            except FileNotFoundError:
-                self.print_msg("Crawl list file not found!", type="error")
-                return
-
-        unique_urls_to_scan = list(set(urls_to_scan))
-        self.log(f"Starting scan on {len(unique_urls_to_scan)} URLs...", type="good")
-        if self.args.bypass_waf:
-            self.log("Running in WAF Bypass mode (Slower, High Accuracy)", type="good")
-
-        with ThreadPoolExecutor(max_workers=self.args.threads) as executor:
-            futures = [executor.submit(self.check_xss, url) for url in unique_urls_to_scan]
-            
-            total = len(futures)
-            completed = 0
-            for f in as_completed(futures):
-                completed += 1
-                
-                # Progress Logic:
-                # Show if (Silent is OFF) OR (Silent is ON AND Verbose is ON)
-                show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
-                
-                if show_progress and total > 0:
-                    percentage = (completed / total) * 100
-                    
-                    sys.stdout.write(f"\r[{Fore.CYAN}PROGRESS{Style.RESET_ALL}] {percentage:.1f}% Completed\033[K")
-                    sys.stdout.flush()
+        # --- OPTIMIZATION START: Async Connection Pooling ---
+        # Limit connections to match concurrency to avoid OS errors on too many open files
+        connector = aiohttp.TCPConnector(
+            limit=self.args.concurrency + 10, 
+            ttl_dns_cache=300,
+            ssl=False
+        )
         
+        async with aiohttp.ClientSession(connector=connector, headers=self.headers) as session:
+            self.session = session # Temporary reference if needed
+
+            if self.args.url:
+                urls_to_scan.append(self.normalize_url(self.args.url))
+
+            if self.args.list:
+                try:
+                    with open(self.args.list, 'r') as f:
+                        urls_to_scan.extend([self.normalize_url(line.strip()) for line in f if line.strip()])
+                except FileNotFoundError:
+                    self.print_msg("URL list file not found!", type="error")
+                    return
+
+            if self.args.url_crawl:
+                start_url = self.normalize_url(self.args.url_crawl)
+                links = await self.extract_links(session, start_url)
+                urls_to_scan.extend(links)
+
+            if self.args.list_crawl:
+                try:
+                     with open(self.args.list_crawl, 'r') as f:
+                        targets = [self.normalize_url(line.strip()) for line in f if line.strip()]
+                        self.log(f"Crawling {len(targets)} targets...", type="info")
+                        
+                        # Crawling Tasks
+                        crawl_tasks = [self.extract_links(session, url) for url in targets]
+                        crawl_results = await asyncio.gather(*crawl_tasks)
+                        
+                        for links in crawl_results:
+                            urls_to_scan.extend(links)
+                except FileNotFoundError:
+                    self.print_msg("Crawl list file not found!", type="error")
+                    return
+
+            unique_urls_to_scan = list(set(urls_to_scan))
+            self.log(f"Starting scan on {len(unique_urls_to_scan)} URLs...", type="good")
+            if self.args.bypass_waf:
+                self.log("Running in WAF Bypass mode (Slower, High Accuracy)", type="good")
+
+            # --- SCANNING PHASE ---
+            scan_tasks = []
+            for url in unique_urls_to_scan:
+                scan_tasks.append(self.check_xss(session, url))
+            
+            if scan_tasks:
+                total = len(scan_tasks)
+                completed = 0
+                
+                # Using as_completed to update progress bar
+                for future in asyncio.as_completed(scan_tasks):
+                    await future
+                    completed += 1
+                    
+                    show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
+                    
+                    if show_progress and total > 0:
+                        percentage = (completed / total) * 100
+                        sys.stdout.write(f"\r[{Fore.CYAN}PROGRESS{Style.RESET_ALL}] {percentage:.1f}% Completed\033[K")
+                        sys.stdout.flush()
+
         if (not self.args.silent) or (self.args.silent and self.args.verbose):
-            # Move to a new line after progress bar is done
             sys.stdout.write("\n")
             self.log("Scan completed.", type="good")
 
 def parse_arguments():
-    
-    parser = argparse.ArgumentParser(description='RefleXSS - Advanced Reflected XSS Scanner')
+    parser = argparse.ArgumentParser(description='RefleXSS - Advanced Reflected XSS Scanner (Async)')
     
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-u', '--url', help='Single URL to scan (must have params)')
@@ -435,36 +428,44 @@ def parse_arguments():
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose mode (Show progress even in silent mode)')
     parser.add_argument('--proxy', help='Single proxy (e.g., http://127.0.0.1:8080)')
     parser.add_argument('--proxy-list', help='File containing list of proxies')
-    parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads (default 10)')
+    
+    # --- ASYNC OPTIMIZATION: Replaced -t with --concurrency ---
+    parser.add_argument('--concurrency', type=int, default=50, help='Max concurrent requests (default 50)')
     
     parser.add_argument('--timeout', type=int, default=10, help='Request timeout in seconds (default 10)')
-    
     parser.add_argument('-c', '--custom-chars', help='Custom payload characters (overrides default). E.g: -c "<>\"\'"')
     parser.add_argument('--bypass-waf', action='store_true', help='Test characters one by one to detect WAF blocks (403)')
-    
-    
     parser.add_argument('--force', action='store_true', help='Force mode: Only report vulnerable if ALL injected characters are reflected.')
 
     return parser.parse_args()
 
 if __name__ == "__main__":
-    args = parse_arguments()
-    
-    if not args.silent:
+    try:
+        # Check for Windows specific asyncio policy (if needed)
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+        args = parse_arguments()
         
-        print(Fore.MAGENTA + r"""
+        if not args.silent:
+            print(Fore.MAGENTA + r"""
     ____       ______   __   _  _____ _____
    / __ \___  / __/ /__ \ \_/ // ___// ___/
   / /_/ / _ \/ /_/ / _ \ \/ /  \__ \ \__ \ 
  / _, _/  __/ __/ /  __/ / /  ___/ /___/ / 
 /_/ |_|\___/_/ /_/\___/_/ \_//____//____/  
                                            
-        """ + Style.RESET_ALL)
-        print(f"[{Fore.GREEN}+{Style.RESET_ALL}] RefleXSS Engine started...")
-        if args.custom_chars:
-             print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Using Custom Chars: {args.custom_chars}")
-        if args.force:
-             print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Force Mode Enabled: Requiring strict reflection of ALL characters.")
+            """ + Style.RESET_ALL)
+            print(f"[{Fore.GREEN}+{Style.RESET_ALL}] RefleXSS Async Engine started...")
+            if args.custom_chars:
+                 print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Using Custom Chars: {args.custom_chars}")
+            if args.force:
+                 print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Force Mode Enabled: Requiring strict reflection of ALL characters.")
 
-    scanner = XSSScanner(args)
-    scanner.run()
+        scanner = AsyncXSSScanner(args)
+        asyncio.run(scanner.run())
+
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}Shutting down please wait...{Style.RESET_ALL}")
+        # Normally async shutdown is more complex, but sys.exit(0) works for script termination
+        sys.exit(0)
