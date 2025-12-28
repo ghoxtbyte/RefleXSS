@@ -159,7 +159,13 @@ class AsyncXSSScanner:
 
         base_domain_root = self.get_base_domain_name(final_url)
         
-        soup = BeautifulSoup(content, 'html.parser')
+        # --- Added try-except around BeautifulSoup parsing ---
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+        except Exception:
+            # If parsing fails due to binary data or malformed HTML, skip this URL
+            return []
+            
         extracted_raw_links = set()
 
         # 1. Standard Tags
