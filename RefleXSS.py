@@ -183,7 +183,7 @@ class AsyncXSSScanner:
         extracted_raw_links.update(regex_links)
         extracted_raw_links.update(regex_abs)
 
-        # 3. Form Input Extraction (NEW FEATURE)
+        # 3. Form Input Extraction 
         # Finds <form> tags with method="GET" and converts inputs to URL parameters
         for form in soup.find_all('form'):
             method = form.get('method', 'get').lower()
@@ -482,10 +482,32 @@ class AsyncXSSScanner:
 
             if crawl_targets:
                 self.log(f"Starting Deep Crawl on {len(crawl_targets)} targets (Depth: 2)...", type="info")
+                
+                # --- CRAWLING LOGIC WITH PROGRESS ---
                 crawl_tasks = [self.crawl_and_extract(session, url, depth=2) for url in crawl_targets]
-                crawl_results = await asyncio.gather(*crawl_tasks)
+                crawl_results = []
+                total_crawl = len(crawl_tasks)
+                completed_crawl = 0
+
+                for future in asyncio.as_completed(crawl_tasks):
+                    res = await future
+                    crawl_results.append(res)
+                    completed_crawl += 1
+                    
+                    # Show progress if not silent OR (silent AND verbose)
+                    show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
+                    
+                    if show_progress and total_crawl > 0:
+                        percentage = (completed_crawl / total_crawl) * 100
+                        sys.stdout.write(f"\r[{Fore.CYAN}CRAWL PROGRESS{Style.RESET_ALL}] {percentage:.1f}% Completed ({completed_crawl}/{total_crawl})\033[K")
+                        sys.stdout.flush()
+
+                if (not self.args.silent) or (self.args.silent and self.args.verbose):
+                     sys.stdout.write("\n")
+                
                 for links in crawl_results:
                     urls_to_scan.extend(links)
+                # ---------------------------------------------
 
             unique_urls_to_scan = list(set(urls_to_scan))
             self.log(f"Starting scan on {len(unique_urls_to_scan)} URLs...", type="good")
@@ -503,10 +525,13 @@ class AsyncXSSScanner:
                 for future in asyncio.as_completed(scan_tasks):
                     await future
                     completed += 1
+                    
+                    # Show progress if not silent OR (silent AND verbose)
                     show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
+                    
                     if show_progress and total > 0:
                         percentage = (completed / total) * 100
-                        sys.stdout.write(f"\r[{Fore.CYAN}PROGRESS{Style.RESET_ALL}] {percentage:.1f}% Completed\033[K")
+                        sys.stdout.write(f"\r[{Fore.CYAN}SCAN PROGRESS{Style.RESET_ALL}] {percentage:.1f}% Completed\033[K")
                         sys.stdout.flush()
 
         if (not self.args.silent) or (self.args.silent and self.args.verbose):
