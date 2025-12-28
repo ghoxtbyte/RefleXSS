@@ -333,9 +333,16 @@ class AsyncXSSScanner:
         self.log(msg, type="vuln")
         vulnerable_urls.append(url)
         
+        # Original Output (-o): Saves only URL
         if self.args.output:
             with open(self.args.output, 'a') as f:
                 f.write(f"{url}\n")
+
+        # Output Context (-oc): Saves URL | Context (Reflected chars)
+        if self.args.output_context:
+            with open(self.args.output_context, 'a') as f:
+                # Format: url | note (Exact same format as silent mode output)
+                f.write(f"{url} | {note}\n")
 
     async def run(self):
         # Semaphore created in the correct loop
@@ -421,6 +428,7 @@ def parse_arguments():
     group.add_argument('-lC', '--list-crawl', help='File containing list of URLs to crawl and scan')
 
     parser.add_argument('-o', '--output', help='File to save vulnerable URLs')
+    parser.add_argument('-oc', '--output-context', help='File to save vulnerable URLs WITH reflected characters') # ADDED THIS
     parser.add_argument('-oC', '--output-crawl', help='File to save crawled URLs')
     parser.add_argument('-s', '--silent', action='store_true', help='Silent mode (only vulns)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose mode (Show progress even in silent mode)')
