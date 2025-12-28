@@ -32,7 +32,7 @@ A powerful, fully asynchronous, and context-aware Reflected Cross-Site Scripting
 **Scan a List of URLs**
 * Load URLs from a file and scan them:
   ```bash
-  python xss-scanner.py -l urls.txt --concurrency 20
+  python xss-scanner.py -l urls.txt --concurrency 50 --timeout 3
 **Crawl and Scan**
 * Crawl a target URL for links and scan discovered parameters:
   ```bash
@@ -57,8 +57,8 @@ A powerful, fully asynchronous, and context-aware Reflected Cross-Site Scripting
 | `-o, --output` | File to save vulnerable URLs. |
 | `-s, --silent` | Silent mode (only prints found vulnerabilities). |
 | `-v, --verbose` | Verbose mode (shows progress even in silent mode). |
-| `--concurrency` | Maximum number of concurrent requests (default: 50). |
-| `--timeout` | Request timeout in seconds (default: 10). |
+| `--concurrency` | Maximum number of concurrent requests (default: 25). |
+| `--timeout` | Request timeout in seconds (default: 5). |
 | `--proxy` | Single proxy (e.g., `http://127.0.0.1:8080`). |
 | `--proxy-list` | File containing a list of proxies. |
 | `-c, --custom-chars` | Custom payload characters to test (e.g., `"<>'"`). |
