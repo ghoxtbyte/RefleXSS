@@ -23,7 +23,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 CANARY = "hackedxss"
 
 # Default dangerous characters 
-DEFAULT_PAYLOAD_CHARS = "\"><';)(&|\\{}[]"
+DEFAULT_PAYLOAD_CHARS = "\"><';)(&|{}[]"
 
 # Extensions to IGNORE during crawl (Static assets)
 IGNORED_EXTENSIONS = (
@@ -612,7 +612,7 @@ def parse_arguments():
     parser.add_argument('--concurrency', type=int, default=25, help='Max concurrent requests (default 25)')
     parser.add_argument('--timeout', type=int, default=5, help='Request timeout in seconds (default 5)')
     parser.add_argument('-c', '--custom-chars', help='Custom payload characters (overrides default). E.g: -c "<>\"\'"')
-    parser.add_argument('--bypass-waf', action='store_true', help='Test characters one by one to detect WAF blocks (403)')
+    parser.add_argument('--waf-bypass', action='store_true', help='Test characters one by one to detect WAF blocks (403)')
     parser.add_argument('--force', action='store_true', help='Force mode: Only report vulnerable if ALL injected characters are reflected.')
 
     return parser.parse_args()
