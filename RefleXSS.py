@@ -90,12 +90,20 @@ class AsyncXSSScanner:
              sys.stdout.write(f"{clear_line}[{Fore.CYAN}CRAWL{Style.RESET_ALL}] {text}\n")
         elif type == "waf":
              sys.stdout.write(f"{clear_line}[{Fore.MAGENTA}WAF{Style.RESET_ALL}] {text}\n")
+        elif type == "debug":
+             sys.stdout.write(f"{clear_line}[{Fore.YELLOW}DEBUG{Style.RESET_ALL}] {text}\n")
         elif type == "plain":
              sys.stdout.write(f"{clear_line}{text}\n")
              
         sys.stdout.flush()
 
     def log(self, message, type="info"):
+        # Always print debug messages if debug flag is on
+        if type == "debug":
+            if self.args.debug:
+                self.print_msg(message, type)
+            return
+
         if self.args.silent:
             if type == "vuln":
                 sys.stdout.write(f"\r\033[K{message}\n")
@@ -187,10 +195,8 @@ class AsyncXSSScanner:
         extracted_raw_links.update(regex_links)
         extracted_raw_links.update(regex_abs)
 
-        # 3. Form Input Extraction (Modified: Any method, plus button)
-        # Handle Forms (GET & POST) to preserve 'action' logic
+        # 3. Form Input Extraction
         for form in soup.find_all('form'):
-            # Removed strict GET check to allow POST forms to be tested via GET params
             action = form.get('action') or ''
             
             if not action:
@@ -199,7 +205,6 @@ class AsyncXSSScanner:
                 action_url = urljoin(final_url, action)
 
             form_params = {}
-            # Added 'button' to the find_all list
             for inp in form.find_all(['input', 'textarea', 'select', 'button']):
                 name = inp.get('name')
                 if name:
@@ -221,7 +226,6 @@ class AsyncXSSScanner:
                     pass
 
         # 3.1 Catch-all inputs (Orphans/No Form)
-        # Scans the entire page for inputs/buttons regardless of form parent
         orphan_params = {}
         for inp in soup.find_all(['input', 'textarea', 'select', 'button']):
             name = inp.get('name')
@@ -230,7 +234,6 @@ class AsyncXSSScanner:
         
         if orphan_params:
             try:
-                # Add these params to the current URL
                 parsed_final = urlparse(final_url)
                 current_q = parse_qs(parsed_final.query)
                 current_q.update(orphan_params)
@@ -243,7 +246,6 @@ class AsyncXSSScanner:
                 extracted_raw_links.add(constructed_url)
             except:
                 pass
-
 
         # --- PHASE 2: PROCESSING & FILTERING ---
         scan_targets = set()     
@@ -332,51 +334,28 @@ class AsyncXSSScanner:
                     
                     params_copy = query_params.copy()
                     params_copy[param_name] = [full_payload]
-                    
                     new_query = urlencode(params_copy, doseq=True)
-                    target_url = urlunparse((
-                        parsed.scheme, parsed.netloc, parsed.path,
-                        parsed.params, new_query, parsed.fragment
-                    ))
+                    target_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
                     status, _, content = await self.make_request(session, target_url)
                     
-                    if content is not None:
+                    if content:
                         if status == 403:
-                            self.log(f"WAF 403 Forbidden detected for char '{char}' on {param_name}", type="waf")
+                            self.log(f"WAF 403 Forbidden detected for char '{char}'", type="waf")
                         else:
                             start_marker = f"{CANARY}{delimiter}"
                             end_marker = delimiter
-                            
                             start_idx = content.find(start_marker)
                             if start_idx != -1:
                                 payload_start = start_idx + len(start_marker)
                                 search_window = content[payload_start : payload_start + 50]
                                 end_idx = search_window.find(end_marker)
-                                
                                 if end_idx != -1:
                                     reflected_data = search_window[:end_idx]
-                                    if char in reflected_data:
-                                        # Strict check for unescaped char (Odd/Even Backslash Logic)
-                                        is_valid = False
-                                        for m in re.finditer(re.escape(char), reflected_data):
-                                            idx = m.start()
-                                            
-                                            # Odd/Even Backslash Count
-                                            bs_count = 0
-                                            check_pos = idx - 1
-                                            while check_pos >= 0 and reflected_data[check_pos] == '\\':
-                                                bs_count += 1
-                                                check_pos -= 1
-                                            
-                                            # If count is even (0, 2, 4...), char is NOT escaped -> Vulnerable
-                                            # If count is odd (1, 3...), char IS escaped -> Safe
-                                            if bs_count % 2 == 0:
-                                                is_valid = True
-                                                break
-                                        
-                                        if is_valid:
-                                            self.report_vuln(target_url, param_name, f"Reflected: {char}")
+                                    
+                                    # Reuse validation logic
+                                    if self.validate_reflection(char, reflected_data, param_name):
+                                         self.report_vuln(target_url, param_name, f"Reflected: {char}")
 
             # --- MODE 2: FAST BATCH ---
             else:
@@ -392,7 +371,8 @@ class AsyncXSSScanner:
                     parsed.params, new_query, parsed.fragment
                 ))
                 
-                self.log(f"Testing param '{param_name}' on: {target_url}", type="info")
+                self.log(f"Testing param '{param_name}'", type="info")
+                self.log(f"Payload URL: {target_url}", type="debug")
                 
                 status, _, content = await self.make_request(session, target_url)
                 
@@ -402,6 +382,9 @@ class AsyncXSSScanner:
                     
                     start_indices = [m.start() for m in re.finditer(re.escape(start_marker), content)]
                     
+                    if not start_indices:
+                         self.log(f"Canary '{CANARY}' found, but full start marker '{start_marker}' missing.", type="debug")
+
                     for start_idx in start_indices:
                         payload_start = start_idx + len(start_marker)
                         window_len = len(self.chars_to_test) * 10 + 100
@@ -410,51 +393,18 @@ class AsyncXSSScanner:
                         end_idx = search_window.find(delimiter)
                         if end_idx != -1:
                             reflected_segment = search_window[:end_idx]
-                            
+                            self.log(f"Reflected Segment found: {reflected_segment}", type="debug")
+
                             if not reflected_segment or CANARY in reflected_segment:
                                 continue
 
                             for char in self.chars_to_test:
                                 if char in reflected_segment:
-                                    found_valid_char = False
-                                    for m in re.finditer(re.escape(char), reflected_segment):
-                                        char_idx = m.start()
-                                        
-                                        # 1. Backslash check (Odd/Even Logic)
-                                        bs_count = 0
-                                        check_pos = char_idx - 1
-                                        while check_pos >= 0 and reflected_segment[check_pos] == '\\':
-                                            bs_count += 1
-                                            check_pos -= 1
-                                        
-                                        # Odd number of backslashes = Escaped (Safe)
-                                        if bs_count % 2 != 0:
-                                            continue
-                                            
-                                        # 2. HTML Entity Start check (e.g. &quot;)
-                                        if char == '&':
-                                            sub = reflected_segment[char_idx:]
-                                            if re.match(r'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});', sub): 
-                                                continue 
-                                        
-                                        # 3. HTML Entity End check
-                                        if char == ';':
-                                            pre = reflected_segment[:char_idx+1]
-                                            if re.search(r'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});$', pre): 
-                                                continue
-
-                                        # 4. URL Encoding check
-                                        if char == '%':
-                                            sub = reflected_segment[char_idx:]
-                                            if re.match(r'%[0-9a-fA-F]{2}', sub): 
-                                                continue
-
-                                        found_valid_char = True
-                                        break
-                                    
-                                    if found_valid_char:
+                                    if self.validate_reflection(char, reflected_segment, param_name):
                                         if char not in reflected_chars:
                                             reflected_chars.append(char)
+                        else:
+                            self.log(f"End delimiter '{delimiter}' not found after start marker.", type="debug")
                         
                     if reflected_chars:
                         reflected_str = "".join(reflected_chars)
@@ -462,11 +412,79 @@ class AsyncXSSScanner:
                             if set(reflected_chars) == set(self.chars_to_test):
                                 self.report_vuln(target_url, param_name, f"Reflected chars (FORCE): {reflected_str}")
                             else:
-                                self.log(f"Partial reflection ignored by --force on {param_name} ({len(reflected_chars)}/{len(self.chars_to_test)} chars)", type="info")
+                                self.log(f"Partial reflection ignored by --force ({len(reflected_chars)}/{len(self.chars_to_test)})", type="info")
                         else:
                             self.report_vuln(target_url, param_name, f"Reflected chars: {reflected_str}")
                     else:
                         self.log(f"Canary reflected but chars filtered/encoded on {param_name}", type="info")
+                else:
+                    self.log(f"Canary '{CANARY}' NOT found in response.", type="debug")
+
+    def validate_reflection(self, char, reflected_text, param_name):
+        """
+        Validates if a character is truly reflected and not escaped/encoded.
+        """
+        is_valid = False
+        
+        # Iterate over all occurrences of the character in the reflection
+        for m in re.finditer(re.escape(char), reflected_text):
+            idx = m.start()
+            self.log(f"Checking char '{char}' at index {idx} in segment...", type="debug")
+            
+            # 1. Backslash Lookbehind (Odd/Even Logic)
+            # Checks if the character is preceded by an odd number of backslashes
+            bs_count = 0
+            check_pos = idx - 1
+            while check_pos >= 0 and reflected_text[check_pos] == '\\':
+                bs_count += 1
+                check_pos -= 1
+            
+            self.log(f" -> Preceding backslashes count: {bs_count}", type="debug")
+
+            if bs_count % 2 != 0:
+                self.log(f" -> Char '{char}' is escaped by preceding backslash(es). Ignored.", type="debug")
+                continue
+                
+            # 2. Backslash Escape Check (Corrected Logic)
+            # If we found a '\' (and it passed the lookbehind check above),
+            # we must ensure it is NOT acting as an escape character for the NEXT character.
+            # Example: In \", the \ is escaping the ". It is NOT a valid injected backslash.
+            if char == '\\':
+                if idx + 1 < len(reflected_text):
+                    next_char = reflected_text[idx + 1]
+                    # If the backslash is followed by a quote or another backslash, 
+                    # it is highly likely an escape artifact provided by the server.
+                    if next_char in ['"', "'", '\\']:
+                        self.log(f" -> Char '\\' is escaping the following '{next_char}'. Ignored.", type="debug")
+                        continue
+
+            # 3. HTML Entity Start check (e.g. &quot;)
+            if char == '&':
+                sub = reflected_text[idx:]
+                if re.match(r'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});', sub): 
+                    self.log(f" -> Char '&' is start of HTML entity. Ignored.", type="debug")
+                    continue 
+            
+            # 4. HTML Entity End check
+            if char == ';':
+                pre = reflected_text[:idx+1]
+                if re.search(r'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});$', pre): 
+                    self.log(f" -> Char ';' is end of HTML entity. Ignored.", type="debug")
+                    continue
+
+            # 5. URL Encoding check
+            if char == '%':
+                sub = reflected_text[idx:]
+                if re.match(r'%[0-9a-fA-F]{2}', sub): 
+                    self.log(f" -> Char '%' is start of URL encoding. Ignored.", type="debug")
+                    continue
+
+            # If passed all checks
+            self.log(f" -> Char '{char}' appears VALID (Not escaped/encoded).", type="debug")
+            is_valid = True
+            break # Found at least one valid occurrence
+        
+        return is_valid
 
     def report_vuln(self, url, param, note):
         if self.args.silent:
@@ -523,7 +541,6 @@ class AsyncXSSScanner:
             if crawl_targets:
                 self.log(f"Starting Deep Crawl on {len(crawl_targets)} targets (Depth: 2)...", type="info")
                 
-                # --- CRAWLING LOGIC WITH PROGRESS ---
                 crawl_tasks = [self.crawl_and_extract(session, url, depth=2) for url in crawl_targets]
                 crawl_results = []
                 total_crawl = len(crawl_tasks)
@@ -534,7 +551,6 @@ class AsyncXSSScanner:
                     crawl_results.append(res)
                     completed_crawl += 1
                     
-                    # Show progress if not silent OR (silent AND verbose)
                     show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
                     
                     if show_progress and total_crawl > 0:
@@ -547,7 +563,6 @@ class AsyncXSSScanner:
                 
                 for links in crawl_results:
                     urls_to_scan.extend(links)
-                # ---------------------------------------------
 
             unique_urls_to_scan = list(set(urls_to_scan))
             self.log(f"Starting scan on {len(unique_urls_to_scan)} URLs...", type="good")
@@ -566,7 +581,6 @@ class AsyncXSSScanner:
                     await future
                     completed += 1
                     
-                    # Show progress if not silent OR (silent AND verbose)
                     show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
                     
                     if show_progress and total > 0:
@@ -592,6 +606,7 @@ def parse_arguments():
     parser.add_argument('-oC', '--output-crawl', help='File to save crawled URLs (Query Strings)')
     parser.add_argument('-s', '--silent', action='store_true', help='Silent mode (only vulns)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose mode (Show progress even in silent mode)')
+    parser.add_argument('--debug', action='store_true', help='Debug mode (Show payloads, raw logic, and reasons for false positives)')
     parser.add_argument('--proxy', help='Single proxy (e.g., http://127.0.0.1:8080)')
     parser.add_argument('--proxy-list', help='File containing list of proxies')
     parser.add_argument('--concurrency', type=int, default=25, help='Max concurrent requests (default 25)')
@@ -619,10 +634,8 @@ if __name__ == "__main__":
                                            
             """ + Style.RESET_ALL)
             print(f"[{Fore.GREEN}+{Style.RESET_ALL}] RefleXSS Async Engine started...")
-            if args.custom_chars:
-                 print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Using Custom Chars: {args.custom_chars}")
-            if args.force:
-                 print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Force Mode Enabled: Requiring strict reflection of ALL characters.")
+            if args.debug:
+                 print(f"[{Fore.YELLOW}DEBUG{Style.RESET_ALL}] Debug Mode Enabled. Expect verbose output.")
 
         scanner = AsyncXSSScanner(args)
         asyncio.run(scanner.run())
