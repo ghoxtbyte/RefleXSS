@@ -8,6 +8,7 @@ import re
 import string
 import ssl
 import warnings
+import os
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode, urlunparse
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from colorama import Fore, Style, init
@@ -112,7 +113,14 @@ class AsyncXSSScanner:
 
         self.print_msg(message, type)
 
-    async def make_request(self, session, url):
+    def get_post_filename(self, filename):
+        """Generates the filename for POST results."""
+        if not filename:
+            return None
+        base, ext = os.path.splitext(filename)
+        return f"{base}_reflexss_post{ext}"
+
+    async def make_request(self, session, url, method="GET", data=None):
         async with self.sem: 
             try:
                 proxy = self.get_proxy()
@@ -120,19 +128,31 @@ class AsyncXSSScanner:
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
 
-                async with session.get(
-                    url, 
-                    proxy=proxy, 
-                    timeout=aiohttp.ClientTimeout(total=self.args.timeout),
-                    ssl=ssl_ctx,
-                    allow_redirects=True
-                ) as response:
-                    text = await response.text(errors='ignore')
-                    return response.status, str(response.url), text
+                # Prepare kwargs
+                req_kwargs = {
+                    'proxy': proxy,
+                    'timeout': aiohttp.ClientTimeout(total=self.args.timeout),
+                    'ssl': ssl_ctx,
+                    'allow_redirects': True
+                }
+
+                if method == "POST":
+                    # Content-Type header is often needed for POST data
+                    post_headers = self.headers.copy()
+                    post_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                    
+                    async with session.post(url, data=data, headers=post_headers, **req_kwargs) as response:
+                        text = await response.text(errors='ignore')
+                        return response.status, str(response.url), text
+                else:
+                    async with session.get(url, headers=self.headers, **req_kwargs) as response:
+                        text = await response.text(errors='ignore')
+                        return response.status, str(response.url), text
+                        
             except Exception as e:
                 if not self.args.silent and self.args.verbose:
                     err_msg = str(e).split(':')[-1].strip() if ':' in str(e) else str(e)
-                    self.log(f"Connection error on {url}: {err_msg}", type="error")
+                    self.log(f"Connection error on {url} ({method}): {err_msg}", type="error")
                 return None, None, None
 
     def normalize_url(self, url):
@@ -284,12 +304,34 @@ class AsyncXSSScanner:
             except:
                 continue
 
-        if self.args.output_crawl and scan_targets:
+        # Save Crawled GET URLs (Only if not in post-only mode)
+        if self.args.output_crawl and scan_targets and not self.args.post_only:
             try:
                 with open(self.args.output_crawl, 'a') as f:
                     for link in scan_targets:
                         f.write(link + '\n')
             except Exception as e:
+                pass
+        
+        # Save Crawled POST URLs (Only if not in get-only mode)
+        # Formatted output for POST crawl file
+        if self.args.output_crawl and scan_targets and not self.args.get_only:
+             post_crawl_file = self.get_post_filename(self.args.output_crawl)
+             try:
+                with open(post_crawl_file, 'a') as f:
+                    for link in scan_targets:
+                        try:
+                            # Parse the URL to separate Base and Query
+                            parsed_link = urlparse(link)
+                            base_link = urlunparse((parsed_link.scheme, parsed_link.netloc, parsed_link.path, '', '', ''))
+                            body_link = parsed_link.query
+                            
+                            # Write in POST format
+                            f.write(f"{base_link} | POST_BODY: {body_link}\n")
+                        except:
+                            # Fallback if parsing fails
+                            f.write(link + '\n')
+             except Exception as e:
                 pass
 
         if scan_targets:
@@ -306,14 +348,25 @@ class AsyncXSSScanner:
 
         return results
 
-    async def check_xss(self, session, url):
+    async def check_xss(self, session, url, method="GET", post_data=None):
+        """
+        Generic check function handling both GET and POST based on 'method'.
+        If method is POST, 'post_data' (string like 'a=1&b=2') is required.
+        """
         parsed = urlparse(url)
-        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        
+        if method == "POST":
+            if not post_data:
+                return
+            query_params = parse_qs(post_data, keep_blank_values=True)
+        else:
+            query_params = parse_qs(parsed.query, keep_blank_values=True)
         
         if not query_params:
             return
 
-        path_identifier = f"{parsed.netloc}{parsed.path}"
+        # Unique identifier for deduplication (Method + URL + Path)
+        path_identifier = f"{method}:{parsed.netloc}{parsed.path}"
         
         for param_name in query_params:
             dedupe_key = f"{path_identifier}:{param_name}"
@@ -326,7 +379,7 @@ class AsyncXSSScanner:
             
             # --- MODE 1: WAF BYPASS ---
             if self.args.waf_bypass:
-                self.log(f"WAF Bypass Mode: Testing param '{param_name}' on: {url}", type="info")
+                self.log(f"WAF Bypass Mode [{method}]: Testing param '{param_name}' on: {url}", type="info")
                 
                 for char in self.chars_to_test:
                     payload_body = f"{delimiter}{char}{delimiter}"
@@ -334,14 +387,20 @@ class AsyncXSSScanner:
                     
                     params_copy = query_params.copy()
                     params_copy[param_name] = [full_payload]
-                    new_query = urlencode(params_copy, doseq=True)
-                    target_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+                    new_query_or_body = urlencode(params_copy, doseq=True)
 
-                    status, _, content = await self.make_request(session, target_url)
+                    if method == "POST":
+                        target_url = url
+                        req_data = new_query_or_body
+                    else:
+                        target_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query_or_body, parsed.fragment))
+                        req_data = None
+
+                    status, _, content = await self.make_request(session, target_url, method=method, data=req_data)
                     
                     if content:
                         if status == 403:
-                            self.log(f"WAF 403 Forbidden detected for char '{char}'", type="waf")
+                            self.log(f"WAF 403 Forbidden detected for char '{char}' ({method})", type="waf")
                         else:
                             start_marker = f"{CANARY}{delimiter}"
                             end_marker = delimiter
@@ -355,7 +414,7 @@ class AsyncXSSScanner:
                                     
                                     # Reuse validation logic
                                     if self.validate_reflection(char, reflected_data, param_name):
-                                         self.report_vuln(target_url, param_name, f"Reflected: {char}")
+                                         self.report_vuln(target_url, param_name, f"Reflected [{method}]: {char}", method=method)
 
             # --- MODE 2: FAST BATCH ---
             else:
@@ -365,16 +424,22 @@ class AsyncXSSScanner:
                 params_copy = query_params.copy()
                 params_copy[param_name] = [full_payload]
                 
-                new_query = urlencode(params_copy, doseq=True)
-                target_url = urlunparse((
-                    parsed.scheme, parsed.netloc, parsed.path,
-                    parsed.params, new_query, parsed.fragment
-                ))
+                new_query_or_body = urlencode(params_copy, doseq=True)
                 
-                self.log(f"Testing param '{param_name}'", type="info")
-                self.log(f"Payload URL: {target_url}", type="debug")
+                if method == "POST":
+                    target_url = url
+                    req_data = new_query_or_body
+                else:
+                    target_url = urlunparse((
+                        parsed.scheme, parsed.netloc, parsed.path,
+                        parsed.params, new_query_or_body, parsed.fragment
+                    ))
+                    req_data = None
                 
-                status, _, content = await self.make_request(session, target_url)
+                self.log(f"Testing param '{param_name}' [{method}]", type="info")
+                self.log(f"Payload ({method}): {target_url} DATA: {req_data if req_data else 'Query'}", type="debug")
+                
+                status, _, content = await self.make_request(session, target_url, method=method, data=req_data)
                 
                 if content and CANARY in content:
                     reflected_chars = []
@@ -410,13 +475,13 @@ class AsyncXSSScanner:
                         reflected_str = "".join(reflected_chars)
                         if self.args.force:
                             if set(reflected_chars) == set(self.chars_to_test):
-                                self.report_vuln(target_url, param_name, f"Reflected chars (FORCE): {reflected_str}")
+                                self.report_vuln(target_url, param_name, f"Reflected chars (FORCE) [{method}]: {reflected_str}", method=method)
                             else:
                                 self.log(f"Partial reflection ignored by --force ({len(reflected_chars)}/{len(self.chars_to_test)})", type="info")
                         else:
-                            self.report_vuln(target_url, param_name, f"Reflected chars: {reflected_str}")
+                            self.report_vuln(target_url, param_name, f"Reflected chars [{method}]: {reflected_str}", method=method)
                     else:
-                        self.log(f"Canary reflected but chars filtered/encoded on {param_name}", type="info")
+                        self.log(f"Canary reflected but chars filtered/encoded on {param_name} [{method}]", type="info")
                 else:
                     self.log(f"Canary '{CANARY}' NOT found in response.", type="debug")
 
@@ -487,21 +552,36 @@ class AsyncXSSScanner:
         
         return is_valid
 
-    def report_vuln(self, url, param, note):
+    def report_vuln(self, url, param, note, method="GET"):
         if self.args.silent:
-            msg = f"{url} | {note}"
+            # Included Param and Method in silent output
+            msg = f"{url} | Param: {param} | {note} | Method: {method}"
         else:
-            msg = f"Potential XSS Found on param '{param}': {url} ({note})"
+            msg = f"Potential XSS Found on param '{param}': {url} ({note}) [{method}]"
             
         self.log(msg, type="vuln")
         vulnerable_urls.append(url)
         
-        if self.args.output:
-            with open(self.args.output, 'a') as f:
-                f.write(f"{url}\n")
-        if self.args.output_context:
-            with open(self.args.output_context, 'a') as f:
-                f.write(f"{url} | {note}\n")
+        # Determine files based on method
+        output_file = self.args.output
+        output_context_file = self.args.output_context
+        
+        if method == "POST":
+            output_file = self.get_post_filename(output_file)
+            output_context_file = self.get_post_filename(output_context_file)
+
+        if output_file:
+            with open(output_file, 'a') as f:
+                # Explicitly writing the parameter name instead of [POST_DATA: See Context]
+                if method == "POST":
+                     f.write(f"{url} | PostParam: {param}\n")
+                else:
+                     f.write(f"{url} | Param: {param}\n")
+        
+        if output_context_file:
+            with open(output_context_file, 'a') as f:
+                # Included Param in context output
+                f.write(f"{url} | Param: {param} | {note} | Method: {method}\n")
 
     async def run(self):
         self.sem = asyncio.Semaphore(self.args.concurrency)
@@ -571,10 +651,47 @@ class AsyncXSSScanner:
             if self.args.waf_bypass:
                 self.log("Running in WAF Bypass mode", type="good")
 
+            # --- PREPARE TASKS ---
             scan_tasks = []
-            for url in unique_urls_to_scan:
-                scan_tasks.append(self.check_xss(session, url))
             
+            for url in unique_urls_to_scan:
+                parsed = urlparse(url)
+
+                # 1. Standard GET check (Existing logic)
+                # Skip if we are in POST-ONLY mode
+                if not self.args.post_only and parsed.query:
+                    scan_tasks.append(self.check_xss(session, url, method="GET"))
+                    
+                # 2. Check if we need to scan this as POST
+                # Conditions to scan as POST:
+                # A. The user specifically asked for POST-ONLY mode.
+                # B. The user asked for FULL-CHECK (and we are not in GET-ONLY mode).
+                # C. The URL was found via crawling (and we are not in GET-ONLY mode).
+                
+                should_scan_post = False
+                
+                if self.args.post_only:
+                    should_scan_post = True
+                elif self.args.full_check and not self.args.get_only:
+                    should_scan_post = True
+                elif (url in crawled_urls) and not self.args.get_only:
+                     # This covers the requirement: "In crawling section, all inputs checked as GET should also be checked as POST!"
+                     should_scan_post = True
+                
+                if should_scan_post and parsed.query:
+                     # Strip query from URL for the POST request
+                     base_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, '', parsed.fragment))
+                     # Use the query string as the POST body
+                     scan_tasks.append(self.check_xss(session, base_url, method="POST", post_data=parsed.query))
+
+                # 3. Explicit POST Mode (--post with --data)
+                # This is a user manual override. If they provide --post and --data, we run it for the main URL.
+                # We generally respect this unless specific exclusions prevent it, but manual args usually take precedence.
+                # However, if --get-only is set, it might be contradictory. Assuming manual args override generic flags.
+                
+                if self.args.post and self.args.data and url == self.normalize_url(self.args.url) and not self.args.get_only:
+                     scan_tasks.append(self.check_xss(session, url, method="POST", post_data=self.args.data))
+
             if scan_tasks:
                 total = len(scan_tasks)
                 completed = 0
@@ -615,8 +732,22 @@ def parse_arguments():
     parser.add_argument('-c', '--custom-chars', help='Custom payload characters (overrides default). E.g: -c "<>\"\'"')
     parser.add_argument('--waf-bypass', action='store_true', help='Test characters one by one to detect WAF blocks (403)')
     parser.add_argument('--force', action='store_true', help='Force mode: Only report vulnerable if ALL injected characters are reflected.')
+    
+    parser.add_argument('--post', action='store_true', help='Enable POST request scanning mode.')
+    parser.add_argument('--data', help='POST data string (e.g., "param1=value&param2=test"). Required if --post is used.')
+    parser.add_argument('--full-check', action='store_true', help='Check GET parameters as POST parameters as well.')
 
-    return parser.parse_args()
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument('--get-only', action='store_true', help='Only scan and crawl GET parameters.')
+    mode_group.add_argument('--post-only', action='store_true', help='Only scan and crawl POST parameters.')
+
+    args = parser.parse_args()
+
+    # Validation for POST arguments
+    if args.post and not args.data:
+        parser.error("--post requires --data to be specified.")
+
+    return args
 
 if __name__ == "__main__":
     try:
