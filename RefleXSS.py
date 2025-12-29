@@ -29,7 +29,7 @@ DEFAULT_PAYLOAD_CHARS = "\"><';)(&|\\{}[]"
 IGNORED_EXTENSIONS = (
     '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', 
     '.webp', '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.mp3', 
-    '.pdf', '.zip', '.rar', '.tar', '.gz', '.xml', '.json'
+    '.pdf', '.zip', '.rar', '.tar', '.gz', '.xml'
 )
 
 # Global Sets for Deduplication
@@ -90,8 +90,6 @@ class AsyncXSSScanner:
              sys.stdout.write(f"{clear_line}[{Fore.CYAN}CRAWL{Style.RESET_ALL}] {text}\n")
         elif type == "waf":
              sys.stdout.write(f"{clear_line}[{Fore.MAGENTA}WAF{Style.RESET_ALL}] {text}\n")
-        elif type == "debug":
-             sys.stdout.write(f"[{Fore.YELLOW}DEBUG{Style.RESET_ALL}] {text}\n")
         elif type == "plain":
              sys.stdout.write(f"{clear_line}{text}\n")
              
@@ -121,8 +119,8 @@ class AsyncXSSScanner:
                     ssl=ssl_ctx,
                     allow_redirects=True
                 ) as response:
-                    content_bytes = await response.read()
-                    return response.status, str(response.url), content_bytes
+                    text = await response.text(errors='ignore')
+                    return response.status, str(response.url), text
             except Exception as e:
                 if not self.args.silent and self.args.verbose:
                     err_msg = str(e).split(':')[-1].strip() if ':' in str(e) else str(e)
@@ -155,29 +153,27 @@ class AsyncXSSScanner:
         crawled_urls.add(url)
         self.log(f"Crawling (Depth {depth}): {url}", type="crawl")
 
-        status, final_url, content_bytes = await self.make_request(session, url)
-        if not content_bytes:
-            return []
-
-        try:
-            content = content_bytes.decode('utf-8', errors='ignore')
-        except:
+        status, final_url, content = await self.make_request(session, url)
+        if not content:
             return []
 
         base_domain_root = self.get_base_domain_name(final_url)
         
+        # --- Added try-except around BeautifulSoup parsing ---
         try:
             soup = BeautifulSoup(content, 'html.parser')
         except Exception:
+            # If parsing fails due to binary data or malformed HTML, skip this URL
             return []
             
         extracted_raw_links = set()
 
+        # 1. Standard Tags
         tags_attributes = {
             'a': 'href', 'link': 'href', 'area': 'href',
             'script': 'src', 'img': 'src', 'iframe': 'src',
             'embed': 'src', 'source': 'src', 'track': 'src',
-            'object': 'data', 'base': 'href'
+            'form': 'action', 'object': 'data', 'base': 'href'
         }
 
         for tag_name, attr_name in tags_attributes.items():
@@ -186,31 +182,41 @@ class AsyncXSSScanner:
                 if val:
                     extracted_raw_links.add(val.strip())
 
+        # 2. Regex Extraction
         regex_links = re.findall(r'(?:href|src|url|action)\s*=\s*["\']([^"\']+)["\']', content)
         regex_abs = re.findall(r'(https?://[a-zA-Z0-9.-]+(?:/[^\s"\'<>]*)?)', content)
         
         extracted_raw_links.update(regex_links)
         extracted_raw_links.update(regex_abs)
 
+        # 3. Form Input Extraction 
+        # Finds <form> tags with method="GET" and converts inputs to URL parameters
         for form in soup.find_all('form'):
+            method = form.get('method', 'get').lower()
+            if method != 'get':
+                continue
+
             action = form.get('action') or ''
-            
+            # Handle empty action (submit to self)
             if not action:
                 action_url = final_url
             else:
                 action_url = urljoin(final_url, action)
 
+            # Collect inputs
             form_params = {}
-            for inp in form.find_all(['input', 'textarea', 'select', 'button']):
+            for inp in form.find_all(['input', 'textarea', 'select']):
                 name = inp.get('name')
                 if name:
+                    # We assign a dummy value just to register the param structure
                     form_params[name] = 'test'
 
             if form_params:
                 try:
+                    # Construct URL with these params
                     parsed_action = urlparse(action_url)
                     current_q = parse_qs(parsed_action.query)
-                    current_q.update(form_params) 
+                    current_q.update(form_params) # Merge form params
                     
                     new_query = urlencode(current_q, doseq=True)
                     constructed_url = urlunparse((
@@ -221,6 +227,7 @@ class AsyncXSSScanner:
                 except:
                     pass
 
+        # --- PHASE 2: PROCESSING & FILTERING ---
         scan_targets = set()     
         next_crawl_targets = set() 
 
@@ -297,121 +304,135 @@ class AsyncXSSScanner:
             
             delimiter = "".join(random.choices(string.ascii_lowercase, k=6))
             
-            payload_body = f"{delimiter}{self.chars_to_test}{delimiter}"
-            full_payload = f"{CANARY}{payload_body}"
-            
-            params_copy = query_params.copy()
-            params_copy[param_name] = [full_payload]
-            
-            new_query = urlencode(params_copy, doseq=True)
-            target_url = urlunparse((
-                parsed.scheme, parsed.netloc, parsed.path,
-                parsed.params, new_query, parsed.fragment
-            ))
-            
-            self.log(f"Testing param '{param_name}' on: {target_url}", type="info")
-            if self.args.debug:
-                self.print_msg(f"Target URL: {target_url}", type="debug")
-            
-            status, _, content = await self.make_request(session, target_url)
-            
-            if content is None:
-                continue
-
-            canary_bytes = CANARY.encode()
-            
-            if canary_bytes in content:
-                reflected_chars = []
-                start_marker_str = f"{CANARY}{delimiter}"
-                start_marker = start_marker_str.encode()
-                delimiter_bytes = delimiter.encode()
+            # --- MODE 1: WAF BYPASS ---
+            if self.args.bypass_waf:
+                self.log(f"WAF Bypass Mode: Testing param '{param_name}' on: {url}", type="info")
                 
-                start_indices = [m.start() for m in re.finditer(re.escape(start_marker), content)]
-                
-                for i, start_idx in enumerate(start_indices):
-                    payload_start = start_idx + len(start_marker)
-                    window_len = len(self.chars_to_test) * 10 + 100
-                    search_window = content[payload_start : payload_start + window_len]
+                for char in self.chars_to_test:
+                    payload_body = f"{delimiter}{char}{delimiter}"
+                    full_payload = f"{CANARY}{payload_body}"
                     
-                    end_idx = search_window.find(delimiter_bytes)
+                    params_copy = query_params.copy()
+                    params_copy[param_name] = [full_payload]
                     
-                    if end_idx != -1:
-                        reflected_segment = search_window[:end_idx]
-                        
-                        if not reflected_segment or canary_bytes in reflected_segment:
-                            continue
-                        
-                        has_encoded_tags = False
-                        if re.search(rb'(%3C|%3c|%3E|%3e|%22|&lt;|&gt;|&quot;)', reflected_segment):
-                            has_encoded_tags = True
+                    new_query = urlencode(params_copy, doseq=True)
+                    target_url = urlunparse((
+                        parsed.scheme, parsed.netloc, parsed.path,
+                        parsed.params, new_query, parsed.fragment
+                    ))
 
-                        for char in self.chars_to_test:
-                            char_bytes = char.encode()
+                    status, _, content = await self.make_request(session, target_url)
+                    
+                    if content is not None:
+                        if status == 403:
+                            self.log(f"WAF 403 Forbidden detected for char '{char}' on {param_name}", type="waf")
+                        else:
+                            start_marker = f"{CANARY}{delimiter}"
+                            end_marker = delimiter
                             
-                            if char_bytes in reflected_segment:
-                                found_valid_char = False
-                                for m in re.finditer(re.escape(char_bytes), reflected_segment):
-                                    char_idx = m.start()
-                                    
-                                    # --- Odd/Even Backslash Check ---
-                                    # Count consecutive backslashes immediately BEFORE this character
-                                    bs_count = 0
-                                    curr = char_idx - 1
-                                    while curr >= 0 and reflected_segment[curr] == 92: # 92 is ASCII for \
-                                        bs_count += 1
-                                        curr -= 1
-                                    
-                                    # If Odd: The last backslash escapes our character -> Ignored
-                                    # If Even: The backslashes escaped themselves (e.g. \\) -> Valid
-                                    if bs_count % 2 == 1:
-                                        continue
+                            start_idx = content.find(start_marker)
+                            if start_idx != -1:
+                                payload_start = start_idx + len(start_marker)
+                                search_window = content[payload_start : payload_start + 50]
+                                end_idx = search_window.find(end_marker)
+                                
+                                if end_idx != -1:
+                                    reflected_data = search_window[:end_idx]
+                                    if char in reflected_data:
+                                        # Strict check for unescaped char
+                                        is_valid = False
+                                        for m in re.finditer(re.escape(char), reflected_data):
+                                            idx = m.start()
+                                            if idx > 0 and reflected_data[idx - 1] == '\\':
+                                                continue
+                                            is_valid = True
+                                            break
+                                        
+                                        if is_valid:
+                                            self.report_vuln(target_url, param_name, f"Reflected: {char}")
 
-                                    # 2. Forward Check for the Backslash character ITSELF
-                                    # If we found a '\' (and it wasn't escaped by a previous \ per above check),
-                                    # we need to see if it is escaping the NEXT character.
-                                    if char == '\\':
-                                        if char_idx + 1 < len(reflected_segment):
-                                            next_char_code = reflected_segment[char_idx + 1]
-                                            # If followed by " or ' or \ it is likely serving as an escape char
-                                            if next_char_code in [34, 39, 92]:
+            # --- MODE 2: FAST BATCH ---
+            else:
+                payload_body = f"{delimiter}{self.chars_to_test}{delimiter}"
+                full_payload = f"{CANARY}{payload_body}"
+                
+                params_copy = query_params.copy()
+                params_copy[param_name] = [full_payload]
+                
+                new_query = urlencode(params_copy, doseq=True)
+                target_url = urlunparse((
+                    parsed.scheme, parsed.netloc, parsed.path,
+                    parsed.params, new_query, parsed.fragment
+                ))
+                
+                self.log(f"Testing param '{param_name}' on: {target_url}", type="info")
+                
+                status, _, content = await self.make_request(session, target_url)
+                
+                if content and CANARY in content:
+                    reflected_chars = []
+                    start_marker = f"{CANARY}{delimiter}"
+                    
+                    start_indices = [m.start() for m in re.finditer(re.escape(start_marker), content)]
+                    
+                    for start_idx in start_indices:
+                        payload_start = start_idx + len(start_marker)
+                        window_len = len(self.chars_to_test) * 10 + 100
+                        search_window = content[payload_start : payload_start + window_len]
+                        
+                        end_idx = search_window.find(delimiter)
+                        if end_idx != -1:
+                            reflected_segment = search_window[:end_idx]
+                            
+                            if not reflected_segment or CANARY in reflected_segment:
+                                continue
+
+                            for char in self.chars_to_test:
+                                if char in reflected_segment:
+                                    found_valid_char = False
+                                    for m in re.finditer(re.escape(char), reflected_segment):
+                                        char_idx = m.start()
+                                        
+                                        # 1. Backslash check
+                                        if char_idx > 0 and reflected_segment[char_idx - 1] == '\\':
+                                            continue
+                                            
+                                        # 2. HTML Entity Start check (e.g. &quot;)
+                                        if char == '&':
+                                            sub = reflected_segment[char_idx:]
+                                            if re.match(r'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});', sub): 
+                                                continue 
+                                        
+                                        # 3. HTML Entity End check
+                                        if char == ';':
+                                            pre = reflected_segment[:char_idx+1]
+                                            if re.search(r'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});$', pre): 
                                                 continue
 
-                                    # 3. HTML Entity Checks
-                                    if char == '&':
-                                        sub = reflected_segment[char_idx:]
-                                        if re.match(rb'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});', sub): 
-                                            continue 
+                                        # 4. URL Encoding check
+                                        if char == '%':
+                                            sub = reflected_segment[char_idx:]
+                                            if re.match(r'%[0-9a-fA-F]{2}', sub): 
+                                                continue
+
+                                        found_valid_char = True
+                                        break
                                     
-                                    if char == ';':
-                                        pre = reflected_segment[:char_idx+1]
-                                        if re.search(rb'&([a-zA-Z0-9]+|#[0-9]{1,6}|#x[0-9a-fA-F]{1,6});$', pre): 
-                                            continue
-
-                                    # 4. URL Encoding check
-                                    if char == '%':
-                                        sub = reflected_segment[char_idx:]
-                                        if re.match(rb'%[0-9a-fA-F]{2}', sub): 
-                                            continue
-
-                                    if has_encoded_tags:
-                                        if char in ["'", "(", ")", ";"]:
-                                            continue
-
-                                    found_valid_char = True
-                                    break
-                                
-                                if found_valid_char:
-                                    if char not in reflected_chars:
-                                        reflected_chars.append(char)
-                    
-                if reflected_chars:
-                    reflected_str = "".join(reflected_chars)
-                    if self.args.force and set(reflected_chars) != set(self.chars_to_test):
-                         pass
+                                    if found_valid_char:
+                                        if char not in reflected_chars:
+                                            reflected_chars.append(char)
+                        
+                    if reflected_chars:
+                        reflected_str = "".join(reflected_chars)
+                        if self.args.force:
+                            if set(reflected_chars) == set(self.chars_to_test):
+                                self.report_vuln(target_url, param_name, f"Reflected chars (FORCE): {reflected_str}")
+                            else:
+                                self.log(f"Partial reflection ignored by --force on {param_name} ({len(reflected_chars)}/{len(self.chars_to_test)} chars)", type="info")
+                        else:
+                            self.report_vuln(target_url, param_name, f"Reflected chars: {reflected_str}")
                     else:
-                        self.report_vuln(target_url, param_name, f"Reflected chars: {reflected_str}")
-                else:
-                    self.log(f"Canary reflected but chars filtered/encoded on {param_name}", type="info")
+                        self.log(f"Canary reflected but chars filtered/encoded on {param_name}", type="info")
 
     def report_vuln(self, url, param, note):
         if self.args.silent:
@@ -452,40 +473,72 @@ class AsyncXSSScanner:
                 except FileNotFoundError:
                     self.print_msg("URL list file not found!", type="error")
                     return
-            
+
             crawl_targets = []
             if self.args.url_crawl:
                 crawl_targets.append(self.normalize_url(self.args.url_crawl))
             
             if self.args.list_crawl:
                 try:
-                    with open(self.args.list_crawl, 'r') as f:
-                         crawl_targets.extend([self.normalize_url(line.strip()) for line in f if line.strip()])
+                     with open(self.args.list_crawl, 'r') as f:
+                        crawl_targets.extend([self.normalize_url(line.strip()) for line in f if line.strip()])
                 except FileNotFoundError:
                     self.print_msg("Crawl list file not found!", type="error")
+                    return
 
             if crawl_targets:
-                self.log(f"Starting Crawl on {len(crawl_targets)} targets...", type="good")
-                crawl_tasks = [self.crawl_and_extract(session, target, depth=2) for target in crawl_targets]
-                crawl_results = await asyncio.gather(*crawl_tasks)
-                for res in crawl_results:
-                    urls_to_scan.extend(res)
+                self.log(f"Starting Deep Crawl on {len(crawl_targets)} targets (Depth: 2)...", type="info")
+                
+                # --- CRAWLING LOGIC WITH PROGRESS ---
+                crawl_tasks = [self.crawl_and_extract(session, url, depth=2) for url in crawl_targets]
+                crawl_results = []
+                total_crawl = len(crawl_tasks)
+                completed_crawl = 0
+
+                for future in asyncio.as_completed(crawl_tasks):
+                    res = await future
+                    crawl_results.append(res)
+                    completed_crawl += 1
+                    
+                    # Show progress if not silent OR (silent AND verbose)
+                    show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
+                    
+                    if show_progress and total_crawl > 0:
+                        percentage = (completed_crawl / total_crawl) * 100
+                        sys.stdout.write(f"\r[{Fore.CYAN}CRAWL PROGRESS{Style.RESET_ALL}] {percentage:.1f}% Completed ({completed_crawl}/{total_crawl})\033[K")
+                        sys.stdout.flush()
+
+                if (not self.args.silent) or (self.args.silent and self.args.verbose):
+                     sys.stdout.write("\n")
+                
+                for links in crawl_results:
+                    urls_to_scan.extend(links)
+                # ---------------------------------------------
 
             unique_urls_to_scan = list(set(urls_to_scan))
+            self.log(f"Starting scan on {len(unique_urls_to_scan)} URLs...", type="good")
             
-            if not unique_urls_to_scan:
-                self.print_msg("No URLs to scan. Crawl found no parameters or no URLs provided.", type="error")
-                return
+            if self.args.bypass_waf:
+                self.log("Running in WAF Bypass mode", type="good")
 
-            self.log(f"Starting scan on {len(unique_urls_to_scan)} unique URLs...", type="good")
-            
             scan_tasks = []
             for url in unique_urls_to_scan:
                 scan_tasks.append(self.check_xss(session, url))
             
             if scan_tasks:
+                total = len(scan_tasks)
+                completed = 0
                 for future in asyncio.as_completed(scan_tasks):
                     await future
+                    completed += 1
+                    
+                    # Show progress if not silent OR (silent AND verbose)
+                    show_progress = (not self.args.silent) or (self.args.silent and self.args.verbose)
+                    
+                    if show_progress and total > 0:
+                        percentage = (completed / total) * 100
+                        sys.stdout.write(f"\r[{Fore.CYAN}SCAN PROGRESS{Style.RESET_ALL}] {percentage:.1f}% Completed\033[K")
+                        sys.stdout.flush()
 
         if (not self.args.silent) or (self.args.silent and self.args.verbose):
             sys.stdout.write("\n")
@@ -505,7 +558,6 @@ def parse_arguments():
     parser.add_argument('-oC', '--output-crawl', help='File to save crawled URLs (Query Strings)')
     parser.add_argument('-s', '--silent', action='store_true', help='Silent mode (only vulns)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose mode (Show progress even in silent mode)')
-    parser.add_argument('--debug', action='store_true', help='Enable DEEP DEBUG mode to see raw response bytes')
     parser.add_argument('--proxy', help='Single proxy (e.g., http://127.0.0.1:8080)')
     parser.add_argument('--proxy-list', help='File containing list of proxies')
     parser.add_argument('--concurrency', type=int, default=25, help='Max concurrent requests (default 25)')
@@ -533,8 +585,10 @@ if __name__ == "__main__":
                                            
             """ + Style.RESET_ALL)
             print(f"[{Fore.GREEN}+{Style.RESET_ALL}] RefleXSS Async Engine started...")
-            if args.debug:
-                 print(f"[{Fore.YELLOW}DEBUG{Style.RESET_ALL}] DEBUG MODE ENABLED - Raw bytes will be analyzed.")
+            if args.custom_chars:
+                 print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Using Custom Chars: {args.custom_chars}")
+            if args.force:
+                 print(f"[{Fore.BLUE}INFO{Style.RESET_ALL}] Force Mode Enabled: Requiring strict reflection of ALL characters.")
 
         scanner = AsyncXSSScanner(args)
         asyncio.run(scanner.run())
