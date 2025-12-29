@@ -23,7 +23,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 CANARY = "hackedxss"
 
 # Default dangerous characters 
-DEFAULT_PAYLOAD_CHARS = "\"><';)(&|{}[]"
+DEFAULT_PAYLOAD_CHARS = "\"><';)(&|{}[]`$|:"
 
 # Extensions to IGNORE during crawl (Static assets)
 IGNORED_EXTENSIONS = (
