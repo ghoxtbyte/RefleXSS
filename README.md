@@ -40,7 +40,7 @@ A powerful, fully asynchronous, and context-aware Reflected Cross-Site Scripting
 **WAF Bypass Mode**
 * Test characters one-by-one to identify which specific characters are triggering the WAF:
   ```bash
-  python xss-scanner.py -u "https://example.com/search?q=test" --bypass-waf
+  python xss-scanner.py -u "https://example.com/search?q=test" --waf-bypass
 **Strict Mode (Force)**
 * Only report a vulnerability if ALL custom characters are reflected (useful for confirming exploitability):
   ```bash
@@ -62,7 +62,7 @@ A powerful, fully asynchronous, and context-aware Reflected Cross-Site Scripting
 | `--proxy` | Single proxy (e.g., `http://127.0.0.1:8080`). |
 | `--proxy-list` | File containing a list of proxies. |
 | `-c, --custom-chars` | Custom payload characters to test (e.g., `"<>'"`). |
-| `--bypass-waf` | Test characters individually to detect/bypass WAF blocks. |
+| `--waf-bypass` | Test characters individually to detect/bypass WAF blocks. |
 | `--force` | Only report vulnerable if **ALL** injected characters are reflected. |
 
 ## 📝 Example Output
