@@ -23,7 +23,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 CANARY = "hackedxss"
 
 # Default dangerous characters 
-DEFAULT_PAYLOAD_CHARS = "\"><';)(&|{}[]`$|:"
+DEFAULT_PAYLOAD_CHARS = "\"><';)(&|{}[]`$|:\\"
 
 # Extensions to IGNORE during crawl (Static assets)
 IGNORED_EXTENSIONS = (
@@ -325,7 +325,7 @@ class AsyncXSSScanner:
             delimiter = "".join(random.choices(string.ascii_lowercase, k=6))
             
             # --- MODE 1: WAF BYPASS ---
-            if self.args.bypass_waf:
+            if self.args.waf_bypass:
                 self.log(f"WAF Bypass Mode: Testing param '{param_name}' on: {url}", type="info")
                 
                 for char in self.chars_to_test:
@@ -433,6 +433,7 @@ class AsyncXSSScanner:
             
             # 1. Backslash Lookbehind (Odd/Even Logic)
             # Checks if the character is preceded by an odd number of backslashes
+            # If char is '\' and reflected as '\\', bs_count will be 1 (for the first slash) and 0 (for the second).
             bs_count = 0
             check_pos = idx - 1
             while check_pos >= 0 and reflected_text[check_pos] == '\\':
@@ -445,15 +446,15 @@ class AsyncXSSScanner:
                 self.log(f" -> Char '{char}' is escaped by preceding backslash(es). Ignored.", type="debug")
                 continue
                 
-            # 2. Backslash Escape Check (Corrected Logic)
-            # If we found a '\' (and it passed the lookbehind check above),
-            # we must ensure it is NOT acting as an escape character for the NEXT character.
-            # Example: In \", the \ is escaping the ". It is NOT a valid injected backslash.
+            # 2. Backslash Escape Check (Logic for injected backslash acting as escaper)
+            # If we injected '\' and it appears as '\' (raw), we must ensure it's not simply the server
+            # adding a slash to escape a following quote.
             if char == '\\':
                 if idx + 1 < len(reflected_text):
                     next_char = reflected_text[idx + 1]
                     # If the backslash is followed by a quote or another backslash, 
-                    # it is highly likely an escape artifact provided by the server.
+                    # it is likely an escape artifact provided by the server, NOT our payload.
+                    # Exception: If we injected '\' and next char is NOT one of these, it's a valid reflection.
                     if next_char in ['"', "'", '\\']:
                         self.log(f" -> Char '\\' is escaping the following '{next_char}'. Ignored.", type="debug")
                         continue
@@ -567,7 +568,7 @@ class AsyncXSSScanner:
             unique_urls_to_scan = list(set(urls_to_scan))
             self.log(f"Starting scan on {len(unique_urls_to_scan)} URLs...", type="good")
             
-            if self.args.bypass_waf:
+            if self.args.waf_bypass:
                 self.log("Running in WAF Bypass mode", type="good")
 
             scan_tasks = []
