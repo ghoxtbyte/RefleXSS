@@ -159,11 +159,9 @@ class AsyncXSSScanner:
 
         base_domain_root = self.get_base_domain_name(final_url)
         
-        # --- Added try-except around BeautifulSoup parsing ---
         try:
             soup = BeautifulSoup(content, 'html.parser')
         except Exception:
-            # If parsing fails due to binary data or malformed HTML, skip this URL
             return []
             
         extracted_raw_links = set()
@@ -189,34 +187,29 @@ class AsyncXSSScanner:
         extracted_raw_links.update(regex_links)
         extracted_raw_links.update(regex_abs)
 
-        # 3. Form Input Extraction 
-        # Finds <form> tags with method="GET" and converts inputs to URL parameters
+        # 3. Form Input Extraction (Modified: Any method, plus button)
+        # Handle Forms (GET & POST) to preserve 'action' logic
         for form in soup.find_all('form'):
-            method = form.get('method', 'get').lower()
-            if method != 'get':
-                continue
-
+            # Removed strict GET check to allow POST forms to be tested via GET params
             action = form.get('action') or ''
-            # Handle empty action (submit to self)
+            
             if not action:
                 action_url = final_url
             else:
                 action_url = urljoin(final_url, action)
 
-            # Collect inputs
             form_params = {}
-            for inp in form.find_all(['input', 'textarea', 'select']):
+            # Added 'button' to the find_all list
+            for inp in form.find_all(['input', 'textarea', 'select', 'button']):
                 name = inp.get('name')
                 if name:
-                    # We assign a dummy value just to register the param structure
                     form_params[name] = 'test'
 
             if form_params:
                 try:
-                    # Construct URL with these params
                     parsed_action = urlparse(action_url)
                     current_q = parse_qs(parsed_action.query)
-                    current_q.update(form_params) # Merge form params
+                    current_q.update(form_params)
                     
                     new_query = urlencode(current_q, doseq=True)
                     constructed_url = urlunparse((
@@ -226,6 +219,31 @@ class AsyncXSSScanner:
                     extracted_raw_links.add(constructed_url)
                 except:
                     pass
+
+        # 3.1 Catch-all inputs (Orphans/No Form)
+        # Scans the entire page for inputs/buttons regardless of form parent
+        orphan_params = {}
+        for inp in soup.find_all(['input', 'textarea', 'select', 'button']):
+            name = inp.get('name')
+            if name:
+                orphan_params[name] = 'test'
+        
+        if orphan_params:
+            try:
+                # Add these params to the current URL
+                parsed_final = urlparse(final_url)
+                current_q = parse_qs(parsed_final.query)
+                current_q.update(orphan_params)
+                
+                new_query = urlencode(current_q, doseq=True)
+                constructed_url = urlunparse((
+                    parsed_final.scheme, parsed_final.netloc, parsed_final.path,
+                    parsed_final.params, new_query, parsed_final.fragment
+                ))
+                extracted_raw_links.add(constructed_url)
+            except:
+                pass
+
 
         # --- PHASE 2: PROCESSING & FILTERING ---
         scan_targets = set()     
@@ -339,14 +357,23 @@ class AsyncXSSScanner:
                                 if end_idx != -1:
                                     reflected_data = search_window[:end_idx]
                                     if char in reflected_data:
-                                        # Strict check for unescaped char
+                                        # Strict check for unescaped char (Odd/Even Backslash Logic)
                                         is_valid = False
                                         for m in re.finditer(re.escape(char), reflected_data):
                                             idx = m.start()
-                                            if idx > 0 and reflected_data[idx - 1] == '\\':
-                                                continue
-                                            is_valid = True
-                                            break
+                                            
+                                            # Odd/Even Backslash Count
+                                            bs_count = 0
+                                            check_pos = idx - 1
+                                            while check_pos >= 0 and reflected_data[check_pos] == '\\':
+                                                bs_count += 1
+                                                check_pos -= 1
+                                            
+                                            # If count is even (0, 2, 4...), char is NOT escaped -> Vulnerable
+                                            # If count is odd (1, 3...), char IS escaped -> Safe
+                                            if bs_count % 2 == 0:
+                                                is_valid = True
+                                                break
                                         
                                         if is_valid:
                                             self.report_vuln(target_url, param_name, f"Reflected: {char}")
@@ -393,8 +420,15 @@ class AsyncXSSScanner:
                                     for m in re.finditer(re.escape(char), reflected_segment):
                                         char_idx = m.start()
                                         
-                                        # 1. Backslash check
-                                        if char_idx > 0 and reflected_segment[char_idx - 1] == '\\':
+                                        # 1. Backslash check (Odd/Even Logic)
+                                        bs_count = 0
+                                        check_pos = char_idx - 1
+                                        while check_pos >= 0 and reflected_segment[check_pos] == '\\':
+                                            bs_count += 1
+                                            check_pos -= 1
+                                        
+                                        # Odd number of backslashes = Escaped (Safe)
+                                        if bs_count % 2 != 0:
                                             continue
                                             
                                         # 2. HTML Entity Start check (e.g. &quot;)
