@@ -8,7 +8,8 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 
 - **⚡ Asynchronous Core**: Built on `asyncio` and `aiohttp` for high-concurrency scanning.
 - **search GET & POST Support**: Scans both query parameters and POST data. Includes capabilities to convert GET parameters to POST (`--full-check`).
-- **🕷️ Smart Crawler**: extract links, forms, and parameters from targets. Automatically constructs valid requests from `<form>` tags.
+- **📥 Raw Request Support**: Directly scan requests from files (e.g., exported from Burp Suite) using `-r`.
+- **🕷️ Smart Crawler**: Extracts links, forms, and parameters. The `-rC` mode extracts headers/cookies from a raw file and starts crawling from there.
 - **🛡️ WAF Bypass Mode**: Tests payload characters individually to identify specific characters triggering 403 blocks.
 - **🧠 Context Analysis**: Validates reflections to ensure they aren't escaped by backslashes, HTML entities, or hex encoding.
 - **🎯 False Positive Reduction**:
@@ -36,6 +37,9 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 * Crawl a domain (depth 2), extract all links and forms, and scan them:
   ```bash
   python RefleXSS.py -uC "https://example.com"
+* **Raw Crawl (`-rC`):** Extract Cookies/Headers from a raw file and use them to crawl/scan authorized areas:
+  ```bash
+  python RefleXSS.py -rC request.txt
 **3. POST Request Scanning**
 * **Manual POST:** Scan a specific endpoint with POST data:
   ```bash
@@ -51,6 +55,17 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 * Only scan POST parameters found during a crawl, and save the output.
   ```bash
   python RefleXSS.py -uC "https://example.com" -c '"<>' --force --post-only -o vulns.txt
+**6. Raw Request Scanning (Burp Suite Style)**
+- Scan a saved raw HTTP request. It automatically detects the method (GET/POST) and parameters:
+  ```bash
+  python RefleXSS.py -r request.txt
+- **Full Check with Raw:** Test the method in the file, then automatically swap (GET to POST / POST to GET) to find hidden vulnerabilities:
+  ```bash
+  python RefleXSS.py -r request.txt --full-check
+**7. **Custom Headers**
+- Add your own headers. Use ;; as a separator to avoid conflicts with Cookie values:
+  ```bash
+  python RefleXSS.py -u "URL" --custom-headers "Authorization: Bearer token;;X-Custom: value"
   
 ## ⚙️ Arguments
 
@@ -61,6 +76,8 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 | `-l, --list` | File containing a list of URLs to scan. |
 | `-uC, --url-crawl` | Single URL to crawl and scan (Recursive). |
 | `-lC, --list-crawl` | File containing a list of URLs to crawl and scan. |
+| `-r, --raw` | Load and scan an HTTP request from a raw file. |
+| `-rC, --raw-crawl` | Extract headers/cookies from a raw file and start crawling. | 
 **Output Options**
 | `-o, --output` | File to save vulnerable URLs. |
 | `-oc, --output-context` | File to save vulnerabilities with details (reflected payload & method). |
@@ -69,6 +86,7 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 | `-v, --verbose` | Show progress bars and details even in silent mode. |
 | `--debug` | Enable debug output (raw payloads, logic flow). |
 **Request Config**
+| `--custom-header` | Add custom headers (Use `;;` as separator). |
 | `--concurrency` | Max concurrent requests (Default: 25). |
 | `--timeout` | Request timeout in seconds (Default: 5). |
 | `--proxy` | Single proxy (e.g., http://127.0.0.1:8080). |
