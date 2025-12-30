@@ -88,7 +88,7 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 **Request Config**
 | `--custom-header` | Add custom headers (Use `;;` as separator). |
 | `--concurrency` | Max concurrent requests (Default: 25). |
-| `--timeout` | Request timeout in seconds (Default: 5). |
+| `--timeout` | Request timeout in seconds (Default: 10). |
 | `--proxy` | Single proxy (e.g., http://127.0.0.1:8080). |
 | `--proxy-list` | File containing a list of proxies. |
 **Scanning Modes**
