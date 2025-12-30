@@ -38,18 +38,44 @@ scanned_params = set()
 crawled_urls = set()
 vulnerable_urls = []
 
+class AsyncNullContext:
+    """Helper context manager that does nothing (used when semaphores aren't needed)."""
+    async def __aenter__(self):
+        return None
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return None
+
 class AsyncXSSScanner:
     def __init__(self, args):
         self.args = args
         self.proxies = self.load_proxies()
         self.sem = None 
+        # Initialize default headers
         self.headers = {'User-Agent': USER_AGENT}
+        
+        # Parse Custom Headers from CLI argument if present
+        if self.args.custom_headers:
+            self.parse_custom_headers(self.args.custom_headers)
 
         if self.args.custom_chars:
             self.chars_to_test = self.args.custom_chars
         else:
             self.chars_to_test = DEFAULT_PAYLOAD_CHARS
             
+    def parse_custom_headers(self, header_str):
+        """Parses custom headers string (Key:Value;;Key2:Value2) and updates self.headers."""
+        try:
+            # Support multiple headers separated by ;; or just one
+            headers_list = header_str.split(';;')
+            for h in headers_list:
+                if ':' in h:
+                    key, value = h.split(':', 1)
+                    self.headers[key.strip()] = value.strip()
+                    if self.args.debug:
+                        self.print_msg(f"Custom Header Set: {key.strip()} = {value.strip()}", type="debug")
+        except Exception as e:
+            self.print_msg(f"Error parsing custom headers: {e}", type="error")
+
     def load_proxies(self):
         proxy_list = []
         if self.args.proxy:
@@ -120,44 +146,230 @@ class AsyncXSSScanner:
         base, ext = os.path.splitext(filename)
         return f"{base}_reflexss_post{ext}"
 
-    async def make_request(self, session, url, method="GET", data=None):
-        async with self.sem: 
+    def parse_raw_request(self, file_path):
+        """
+        Parses a raw HTTP request from a file.
+        Returns: (method, url, headers_dict, body)
+        """
+        try:
+            self.log(f"Reading raw request file: {file_path}", type="debug")
+            with open(file_path, 'r') as f:
+                content = f.read()
+            
+            lines = content.splitlines()
+            if not lines:
+                return None, None, None, None
+
+            # 1. Request Line (GET /path HTTP/1.1)
+            req_line = lines[0].split()
+            if len(req_line) < 2:
+                return None, None, None, None
+            
+            method = req_line[0].upper()
+            path = req_line[1]
+            self.log(f"Raw Request Line Parsed: {method} {path}", type="debug")
+            
+            # 2. Headers
+            headers = {}
+            body = ""
+            i = 1
+            while i < len(lines):
+                line = lines[i]
+                if line == "" or line == "\r":
+                    # End of headers, start of body
+                    body = "\n".join(lines[i+1:])
+                    break
+                
+                if ':' in line:
+                    key, val = line.split(':', 1)
+                    headers[key.strip()] = val.strip()
+                i += 1
+            
+            self.log(f"Raw Headers Found: {len(headers)}", type="debug")
+
+            # 3. Construct URL
+            # Prefer Host header, fallback to args or localhost
+            host = headers.get('Host', headers.get('host'))
+            if not host:
+                self.log("Host header missing in raw request. Assuming 127.0.0.1", type="error")
+                host = "127.0.0.1"
+            
+            # --- SCHEME HANDLING ---
+            # Default to http. The probe will decide if we should upgrade.
+            # We do NOT force https based on HTTP/2 anymore to avoid connection errors if SSL fails.
+            scheme = "http" 
+            if ":443" in host:
+                scheme = "https"
+
+            full_url = f"{scheme}://{host}{path}"
+            
+            # Normalize URL
+            full_url = self.normalize_url(full_url)
+            self.log(f"Reconstructed Base URL from Raw: {full_url}", type="debug")
+            
+            return method, full_url, headers, body
+
+        except Exception as e:
+            self.print_msg(f"Error parsing raw request file: {e}", type="error")
+            return None, None, None, None
+
+    async def make_request(self, session, url, method="GET", data=None, check_only=False):
+        """
+        Handles requests with MANUAL REDIRECT logic to preserve headers (Authorization, etc.)
+        """
+        # Select appropriate context manager
+        if check_only:
+            ctx = AsyncNullContext()
+        else:
+            ctx = self.sem
+
+        async with ctx: 
             try:
                 proxy = self.get_proxy()
                 ssl_ctx = ssl.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
+                # Attempt to set permissive ciphers to avoid handshake errors
+                try:
+                    ssl_ctx.set_ciphers('DEFAULT')
+                except:
+                    pass
 
                 # Prepare kwargs
+                # IMPORTANT: allow_redirects=False so we can handle them manually
                 req_kwargs = {
                     'proxy': proxy,
                     'timeout': aiohttp.ClientTimeout(total=self.args.timeout),
                     'ssl': ssl_ctx,
-                    'allow_redirects': True
+                    'allow_redirects': False 
                 }
 
+                # Use self.headers which now includes custom headers
+                req_headers = self.headers.copy()
+
                 if method == "POST":
-                    # Content-Type header is often needed for POST data
-                    post_headers = self.headers.copy()
-                    post_headers['Content-Type'] = 'application/x-www-form-urlencoded'
-                    
-                    async with session.post(url, data=data, headers=post_headers, **req_kwargs) as response:
-                        text = await response.text(errors='ignore')
-                        return response.status, str(response.url), text
-                else:
-                    async with session.get(url, headers=self.headers, **req_kwargs) as response:
-                        text = await response.text(errors='ignore')
-                        return response.status, str(response.url), text
-                        
+                    if 'Content-Type' not in req_headers and 'content-type' not in req_headers:
+                        req_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+
+                # Manual Redirect Loop
+                current_url = url
+                redirect_count = 0
+                max_redirects = 5
+
+                while redirect_count < max_redirects:
+                    if self.args.debug and not check_only:
+                        self.log(f"[{method}] {current_url} (Redirects: {redirect_count})", type="debug")
+
+                    if method == "POST" and redirect_count == 0:
+                        # Only send data on the first POST request usually, 
+                        # but if 307/308 preserve method, we might need to re-send.
+                        # For now, simplistic approach:
+                        response = await session.post(current_url, data=data, headers=req_headers, **req_kwargs)
+                    elif method == "HEAD":
+                        response = await session.head(current_url, headers=req_headers, **req_kwargs)
+                    else:
+                        response = await session.get(current_url, headers=req_headers, **req_kwargs)
+
+                    async with response:
+                        if response.status in [301, 302, 303, 307, 308]:
+                            redirect_location = response.headers.get('Location')
+                            if not redirect_location:
+                                return response.status, str(response.url), await response.text(errors='ignore')
+                            
+                            # Calculate new URL
+                            current_url = urljoin(current_url, redirect_location)
+                            redirect_count += 1
+                            
+                            # 303 always changes to GET
+                            if response.status == 303:
+                                method = "GET"
+                                data = None
+                            
+                            # If we are just checking connectivity (HEAD/Probe), we can stop at the first redirect usually,
+                            # BUT to find the real final URL, we should follow.
+                            continue
+                        else:
+                            # Not a redirect, return result
+                            text = await response.text(errors='ignore')
+                            if self.args.debug and not check_only:
+                                 self.log(f"Response: {response.status} [{current_url}]", type="debug")
+                            return response.status, str(current_url), text
+                
+                # If Max redirects reached
+                return 310, str(current_url), ""
+
             except Exception as e:
-                if not self.args.silent and self.args.verbose:
-                    err_msg = str(e).split(':')[-1].strip() if ':' in str(e) else str(e)
-                    self.log(f"Connection error on {url} ({method}): {err_msg}", type="error")
+                # Show error if verbose OR debug is enabled
+                if (not self.args.silent and self.args.verbose) or self.args.debug:
+                    # Print the specific error class to help debugging
+                    err_msg = f"{e.__class__.__name__}: {str(e)}"
+                    if not check_only:
+                        self.log(f"Connection error on {url} ({method}): {err_msg}", type="error")
                 return None, None, None
 
+    async def detect_protocols(self, session, raw_target):
+        """
+        Smartly detects if the target supports HTTP, HTTPS, or BOTH.
+        """
+        valid_urls = []
+        target = raw_target.strip()
+        if not target:
+            return []
+
+        if "://" in target:
+            parsed = urlparse(target)
+            host_part = parsed.netloc
+            path_part = parsed.path
+            query_part = parsed.query
+        else:
+            if "/" in target:
+                parts = target.split("/", 1)
+                host_part = parts[0]
+                path_part = "/" + parts[1]
+                query_part = ""
+            else:
+                host_part = target
+                path_part = ""
+                query_part = ""
+
+        # Construct candidates
+        candidates = [
+            f"http://{host_part}{path_part}",
+            f"https://{host_part}{path_part}"
+        ]
+        
+        if query_part:
+            candidates = [f"{c}?{query_part}" for c in candidates]
+
+        if self.args.debug:
+            self.log(f"Probing protocols for: {host_part}", type="debug")
+
+        for url in candidates:
+            # Try HEAD first (fast)
+            status, real_url, _ = await self.make_request(session, url, method="HEAD", check_only=True)
+            
+            if status is not None:
+                if self.args.debug:
+                    self.log(f"Probe Successful: {url} -> {real_url} (Status: {status})", type="debug")
+                valid_urls.append(real_url)
+            else:
+                # If HEAD failed, try GET
+                status, real_url, _ = await self.make_request(session, url, method="GET", check_only=True)
+                if status is not None:
+                     if self.args.debug:
+                        self.log(f"Probe Successful (GET fallback): {url} -> {real_url}", type="debug")
+                     valid_urls.append(real_url)
+                else:
+                     if self.args.debug:
+                        self.log(f"Probe Failed: {url}", type="debug")
+
+        return list(set(valid_urls))
+
     def normalize_url(self, url):
+        # This is now a basic formatter. 
+        # The intelligent protocol detection happens in detect_protocols
         if not url.startswith('http://') and not url.startswith('https://'):
-            return f'https://{url}'
+            return f'http://{url}' # Default to http for parsing, will be upgraded by probe
         return url
 
     def get_base_domain_name(self, url):
@@ -182,14 +394,22 @@ class AsyncXSSScanner:
         self.log(f"Crawling (Depth {depth}): {url}", type="crawl")
 
         status, final_url, content = await self.make_request(session, url)
+        
+        if self.args.debug:
+            self.log(f"Crawl Response: {status} | URL: {final_url} | Content-Length: {len(content) if content else 0}", type="debug")
+
         if not content:
+            if self.args.debug:
+                self.log(f"Empty content for {url}", type="debug")
             return []
 
         base_domain_root = self.get_base_domain_name(final_url)
         
         try:
             soup = BeautifulSoup(content, 'html.parser')
-        except Exception:
+        except Exception as e:
+            if self.args.debug:
+                self.log(f"Soup parsing error: {e}", type="debug")
             return []
             
         extracted_raw_links = set()
@@ -270,6 +490,9 @@ class AsyncXSSScanner:
         # --- PHASE 2: PROCESSING & FILTERING ---
         scan_targets = set()     
         next_crawl_targets = set() 
+        
+        if self.args.debug:
+            self.log(f"Total raw links extracted: {len(extracted_raw_links)}", type="debug")
 
         for raw_link in extracted_raw_links:
             if not raw_link or raw_link.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
@@ -281,6 +504,7 @@ class AsyncXSSScanner:
                 
                 link_domain_root = self.get_base_domain_name(full_url)
                 if link_domain_root != base_domain_root:
+                    # if self.args.debug: self.log(f"Ignored external domain: {full_url}", type="debug")
                     continue
 
                 path_lower = parsed.path.lower()
@@ -586,7 +810,8 @@ class AsyncXSSScanner:
     async def run(self):
         self.sem = asyncio.Semaphore(self.args.concurrency)
         urls_to_scan = []
-
+        raw_scan_tasks = [] # To hold specific tasks from -r (Raw Request)
+        
         connector = aiohttp.TCPConnector(
             limit=self.args.concurrency + 10, 
             ttl_dns_cache=300,
@@ -596,29 +821,84 @@ class AsyncXSSScanner:
         async with aiohttp.ClientSession(connector=connector, headers=self.headers) as session:
             self.session = session 
 
-            if self.args.url:
-                urls_to_scan.append(self.normalize_url(self.args.url))
+            # --- INPUT PROCESSING WITH SMART PROTOCOL DETECTION ---
+            raw_scan_inputs = []
+            raw_crawl_inputs = []
 
+            # 1. Standard URL
+            if self.args.url:
+                raw_scan_inputs.append(self.args.url)
+
+            # 2. List of URLs
             if self.args.list:
                 try:
                     with open(self.args.list, 'r') as f:
-                        urls_to_scan.extend([self.normalize_url(line.strip()) for line in f if line.strip()])
+                        raw_scan_inputs.extend([line.strip() for line in f if line.strip()])
                 except FileNotFoundError:
                     self.print_msg("URL list file not found!", type="error")
                     return
-
-            crawl_targets = []
-            if self.args.url_crawl:
-                crawl_targets.append(self.normalize_url(self.args.url_crawl))
             
+            # 3. Standard Crawl URL
+            if self.args.url_crawl:
+                raw_crawl_inputs.append(self.args.url_crawl)
+            
+            # 4. List Crawl
             if self.args.list_crawl:
                 try:
                      with open(self.args.list_crawl, 'r') as f:
-                        crawl_targets.extend([self.normalize_url(line.strip()) for line in f if line.strip()])
+                        raw_crawl_inputs.extend([line.strip() for line in f if line.strip()])
                 except FileNotFoundError:
                     self.print_msg("Crawl list file not found!", type="error")
                     return
 
+            # --- PROCESS RAW TARGETS (Probe HTTP/HTTPS) ---
+            # We must detect if they are HTTP, HTTPS, or BOTH
+            
+            crawl_targets = []
+            
+            if raw_scan_inputs:
+                self.log(f"Probing protocols for {len(raw_scan_inputs)} scan targets...", type="info")
+                processed_scan_urls = []
+                for raw_in in raw_scan_inputs:
+                    valid_urls = await self.detect_protocols(session, raw_in)
+                    processed_scan_urls.extend(valid_urls)
+                urls_to_scan.extend(processed_scan_urls)
+
+            if raw_crawl_inputs:
+                self.log(f"Probing protocols for {len(raw_crawl_inputs)} crawl targets...", type="info")
+                processed_crawl_urls = []
+                for raw_in in raw_crawl_inputs:
+                    valid_urls = await self.detect_protocols(session, raw_in)
+                    processed_crawl_urls.extend(valid_urls)
+                crawl_targets.extend(processed_crawl_urls)
+
+            # 5. Raw Request Crawl (-rC)
+            if self.args.raw_crawl:
+                self.log(f"Parsing raw HTTP file for crawling: {self.args.raw_crawl}", type="info")
+                r_method, r_url, r_headers, r_body = self.parse_raw_request(self.args.raw_crawl)
+                
+                if r_url:
+                    # Filter headers
+                    if r_headers:
+                        skip_headers = ['content-length', 'content-type', 'accept-encoding', 'host', 'connection', 'upgrade-insecure-requests']
+                        cleaned_headers = {k: v for k, v in r_headers.items() if k.lower() not in skip_headers}
+                        self.headers.update(cleaned_headers)
+                        if self.args.custom_headers:
+                             self.parse_custom_headers(self.args.custom_headers)
+                    
+                    # PROBE PROTOCOLS for Raw Request
+                    detected = await self.detect_protocols(session, r_url)
+                    if detected:
+                        self.log(f"Raw Request Crawl Targets: {detected}", type="good")
+                        crawl_targets.extend(detected)
+                    else:
+                        self.log("Could not establish connection to Raw Request target (checked both HTTP/HTTPS).", type="error")
+
+                else:
+                    self.print_msg("Failed to parse raw request for crawling.", type="error")
+                    return
+
+            # --- EXECUTE CRAWLING ---
             if crawl_targets:
                 self.log(f"Starting Deep Crawl on {len(crawl_targets)} targets (Depth: 2)...", type="info")
                 
@@ -645,8 +925,63 @@ class AsyncXSSScanner:
                 for links in crawl_results:
                     urls_to_scan.extend(links)
 
+            # --- EXECUTE SCANNING ---
             unique_urls_to_scan = list(set(urls_to_scan))
-            self.log(f"Starting scan on {len(unique_urls_to_scan)} URLs...", type="good")
+            
+            # 6. Raw Request Scan (-r)
+            if self.args.raw_request:
+                self.log(f"Parsing raw HTTP file for scanning: {self.args.raw_request}", type="info")
+                r_method, r_url, r_headers, r_body = self.parse_raw_request(self.args.raw_request)
+                
+                if r_url:
+                    # PROBE PROTOCOLS for Raw Request Scan
+                    # Since Raw Request might rely on specific host headers, we use the detected URL 
+                    # but we keep the body/headers logic.
+                    
+                    valid_raw_targets = await self.detect_protocols(session, r_url)
+                    
+                    if valid_raw_targets:
+                        # Update headers
+                        if r_headers:
+                            skip_headers = ['content-length', 'content-type', 'host', 'connection']
+                            cleaned_headers = {k: v for k, v in r_headers.items() if k.lower() not in skip_headers}
+                            self.headers.update(cleaned_headers)
+                            if self.args.custom_headers:
+                                self.parse_custom_headers(self.args.custom_headers)
+                        
+                        for valid_r_url in valid_raw_targets:
+                            self.log(f"Raw Request Scanning Target: {valid_r_url}", type="good")
+                            
+                            # Logic for Raw Request Scanning (Duplicated for each valid protocol)
+                            if r_method == "POST":
+                                if not self.args.get_only:
+                                     raw_scan_tasks.append(self.check_xss(session, valid_r_url, method="POST", post_data=r_body))
+                                
+                                if (self.args.full_check or self.args.get_only) and r_body:
+                                     try:
+                                         parsed_r = urlparse(valid_r_url)
+                                         new_query = r_body if not parsed_r.query else f"{parsed_r.query}&{r_body}"
+                                         new_url = urlunparse((parsed_r.scheme, parsed_r.netloc, parsed_r.path, parsed_r.params, new_query, parsed_r.fragment))
+                                         raw_scan_tasks.append(self.check_xss(session, new_url, method="GET"))
+                                     except:
+                                         pass
+
+                            elif r_method == "GET":
+                                if not self.args.post_only:
+                                    raw_scan_tasks.append(self.check_xss(session, valid_r_url, method="GET"))
+                                
+                                parsed_r = urlparse(valid_r_url)
+                                if (self.args.full_check or self.args.post_only) and parsed_r.query:
+                                    base_r_url = urlunparse((parsed_r.scheme, parsed_r.netloc, parsed_r.path, parsed_r.params, '', parsed_r.fragment))
+                                    raw_scan_tasks.append(self.check_xss(session, base_r_url, method="POST", post_data=parsed_r.query))
+                    else:
+                        self.log("Could not establish connection to Raw Request target (checked both HTTP/HTTPS).", type="error")
+
+                else:
+                    self.print_msg("Failed to parse raw request for scanning.", type="error")
+
+            
+            self.log(f"Starting scan on {len(unique_urls_to_scan) + len(raw_scan_tasks)} targets...", type="good")
             
             if self.args.waf_bypass:
                 self.log("Running in WAF Bypass mode", type="good")
@@ -654,6 +989,9 @@ class AsyncXSSScanner:
             # --- PREPARE TASKS ---
             scan_tasks = []
             
+            # Add Raw Tasks first
+            scan_tasks.extend(raw_scan_tasks)
+
             for url in unique_urls_to_scan:
                 parsed = urlparse(url)
 
@@ -663,11 +1001,6 @@ class AsyncXSSScanner:
                     scan_tasks.append(self.check_xss(session, url, method="GET"))
                     
                 # 2. Check if we need to scan this as POST
-                # Conditions to scan as POST:
-                # A. The user specifically asked for POST-ONLY mode.
-                # B. The user asked for FULL-CHECK (and we are not in GET-ONLY mode).
-                # C. The URL was found via crawling (and we are not in GET-ONLY mode).
-                
                 should_scan_post = False
                 
                 if self.args.post_only:
@@ -685,10 +1018,6 @@ class AsyncXSSScanner:
                      scan_tasks.append(self.check_xss(session, base_url, method="POST", post_data=parsed.query))
 
                 # 3. Explicit POST Mode (--post with --data)
-                # This is a user manual override. If they provide --post and --data, we run it for the main URL.
-                # We generally respect this unless specific exclusions prevent it, but manual args usually take precedence.
-                # However, if --get-only is set, it might be contradictory. Assuming manual args override generic flags.
-                
                 if self.args.post and self.args.data and url == self.normalize_url(self.args.url) and not self.args.get_only:
                      scan_tasks.append(self.check_xss(session, url, method="POST", post_data=self.args.data))
 
@@ -718,6 +1047,9 @@ def parse_arguments():
     group.add_argument('-l', '--list', help='File containing list of URLs to scan')
     group.add_argument('-uC', '--url-crawl', help='Single URL to crawl and scan')
     group.add_argument('-lC', '--list-crawl', help='File containing list of URLs to crawl and scan')
+    
+    group.add_argument('-r', '--raw-request', help='File containing a raw HTTP request to scan.')
+    group.add_argument('-rC', '--raw-crawl', help='File containing a raw HTTP request to crawl and scan.')
 
     parser.add_argument('-o', '--output', help='File to save vulnerable URLs')
     parser.add_argument('-oc', '--output-context', help='File to save vulnerable URLs WITH reflected characters')
@@ -733,6 +1065,8 @@ def parse_arguments():
     parser.add_argument('--waf-bypass', action='store_true', help='Test characters one by one to detect WAF blocks (403)')
     parser.add_argument('--force', action='store_true', help='Force mode: Only report vulnerable if ALL injected characters are reflected.')
     
+    parser.add_argument('--custom-headers', help='Custom headers (e.g., "Cookie: auth=1;;Referer: google.com")')
+
     parser.add_argument('--post', action='store_true', help='Enable POST request scanning mode.')
     parser.add_argument('--data', help='POST data string (e.g., "param1=value&param2=test"). Required if --post is used.')
     parser.add_argument('--full-check', action='store_true', help='Check GET parameters as POST parameters as well.')
