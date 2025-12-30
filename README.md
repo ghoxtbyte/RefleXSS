@@ -1,77 +1,96 @@
-# Advanced Reflected XSS Scanner
+# RefleXSS - Advanced Async XSS Scanner
 
-A powerful, fully asynchronous, and context-aware Reflected Cross-Site Scripting (XSS) scanner written in Python. It supports crawling, WAF bypassing, and custom payload injection with detailed reporting.
+RefleXSS is a powerful, fully asynchronous, and context-aware Reflected Cross-Site Scripting (XSS) scanner. It is designed to reduce false positives by analyzing the context of the reflection (e.g., checking for escaping, HTML entities, and URL encoding).
 
-## 🚀 Features
+It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF bypassing, and highly configurable payload injection.
 
-- **Multi-Mode Scanning**: Scan single URLs, lists of URLs, or crawl and scan targets recursively.
-- **Smart Reflection Detection**: Detects reflected characters in the response body.
-- **WAF Bypass Mode**: Tests payload characters individually to identify and bypass Web Application Firewalls (403 filtering).
-- **Force Mode**: Strict verification that requires *all* injected characters to be reflected (reduces false positives).
-- **Context Analysis**: Checks for HTML entities and hex encoding to avoid false positives.
-- **Performance**: Asynchronous architecture (AsyncIO & AIOHTTP) for blazing fast, high-concurrency scanning.
-- **Crawler**: Built-in web crawler to extract links and parameters from target domains.
-- **Proxy Support**: Supports HTTP/HTTPS proxies and proxy lists.
+## 🚀 Key Features
+
+- **⚡ Asynchronous Core**: Built on `asyncio` and `aiohttp` for high-concurrency scanning.
+- **search GET & POST Support**: Scans both query parameters and POST data. Includes capabilities to convert GET parameters to POST (`--full-check`).
+- **🕷️ Smart Crawler**: extract links, forms, and parameters from targets. Automatically constructs valid requests from `<form>` tags.
+- **🛡️ WAF Bypass Mode**: Tests payload characters individually to identify specific characters triggering 403 blocks.
+- **🧠 Context Analysis**: Validates reflections to ensure they aren't escaped by backslashes, HTML entities, or hex encoding.
+- **🎯 False Positive Reduction**:
+  - **Force Mode**: Strict verification requiring all injected characters to be reflected.
+  - **Reflection Validation**: Checks if the reflection is actually dangerous.
+- **📝 Detailed Reporting**: Separate outputs for vulnerable URLs, context data (what exactly was reflected), and crawled endpoints.
 
 ## 📦 Installation
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/ghoxtbyte/xss-scanner.git
-   cd xss-scanner
+   git clone https://github.com/ghoxtbyte/RefleXSS.git
+   cd RefleXSS
 2. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
 
 ## 🛠 Usage
 
-**Basic Scan**
-* Scan a single URL for Reflected XSS:
+**1. Basic Scan**
+* Scan a single URL. The tool will inject payloads into the `q` parameter:
   ```bash
-  python xss-scanner.py -u "https://example.com/search.php?q=test&x="
-**Scan a List of URLs**
-* Load URLs from a file and scan them:
+  python RefleXSS.py -u "https://example.com/search.php?q=test"
+**2. Crawling & Scanning**
+* Crawl a domain (depth 2), extract all links and forms, and scan them:
   ```bash
-  python xss-scanner.py -l urls.txt --concurrency 50 --timeout 3
-**Crawl and Scan**
-* Crawl a target URL for links and scan discovered parameters:
+  python RefleXSS.py -uC "https://example.com"
+**3. POST Request Scanning**
+* **Manual POST:** Scan a specific endpoint with POST data:
   ```bash
-  python xss-scanner.py -uC "https://example.com"
-**WAF Bypass Mode**
-* Test characters one-by-one to identify which specific characters are triggering the WAF:
+  python RefleXSS.py -u "https://example.com/login" --post --data "user=test&pass=123"
+* **Full Check (GET + POST):** Scan GET parameters normally, but also attempt to send them as POST requests:
   ```bash
-  python xss-scanner.py -u "https://example.com/search?q=test" --waf-bypass
-**Strict Mode (Force)**
-* Only report a vulnerability if ALL custom characters are reflected (useful for confirming exploitability):
+  python RefleXSS.py -l urls.txt --full-check -s -v --timeout 3 -oc result.txt
+**4. WAF Bypass Mode**
+* If a WAF is blocking requests, use this mode to see exactly which characters cause a 403 or get filtered:
   ```bash
-  python xss-scanner.py -u "https://example.com/page?id=1&s=search" --custom-chars '"<>' --force 
+  python RefleXSS.py -u "https://example.com/search?q=test" --waf-bypass
+**5. Advanced Filtering**
+* Only scan POST parameters found during a crawl, and save the output.
+  ```bash
+  python RefleXSS.py -uC "https://example.com" -c '"<>' --force --post-only -o vulns.txt
   
 ## ⚙️ Arguments
 
 | Argument | Description |
 |--------|-------------|
+**Input Options**
 | `-u, --url` | Single URL to scan (must have parameters). |
 | `-l, --list` | File containing a list of URLs to scan. |
-| `-uC, --url-crawl` | Single URL to crawl and then scan discovered links. |
+| `-uC, --url-crawl` | Single URL to crawl and scan (Recursive). |
 | `-lC, --list-crawl` | File containing a list of URLs to crawl and scan. |
+**Output Options**
 | `-o, --output` | File to save vulnerable URLs. |
-| `-s, --silent` | Silent mode (only prints found vulnerabilities). |
-| `-v, --verbose` | Verbose mode (shows progress even in silent mode). |
-| `--concurrency` | Maximum number of concurrent requests (default: 25). |
-| `--timeout` | Request timeout in seconds (default: 5). |
-| `--proxy` | Single proxy (e.g., `http://127.0.0.1:8080`). |
+| `-oc, --output-context` | File to save vulnerabilities with details (reflected payload & method). |
+| `-oC, --output-crawl` | File to save all discovered (crawled) URLs/Parameters. |
+| `-s, --silent` | Silent mode (suppress logos and info, show only vulns). |
+| `-v, --verbose` | Show progress bars and details even in silent mode. |
+| `--debug` | Enable debug output (raw payloads, logic flow). |
+**Request Config**
+| `--concurrency` | Max concurrent requests (Default: 25). |
+| `--timeout` | Request timeout in seconds (Default: 5). |
+| `--proxy` | Single proxy (e.g., http://127.0.0.1:8080). |
 | `--proxy-list` | File containing a list of proxies. |
-| `-c, --custom-chars` | Custom payload characters to test (e.g., `"<>'"`). |
-| `--waf-bypass` | Test characters individually to detect/bypass WAF blocks. |
-| `--force` | Only report vulnerable if **ALL** injected characters are reflected. |
+**Scanning Modes**
+| `--post` | Enable manual POST mode (requires `--data`). |
+| `--data` | POST body string (e.g., id=1&search=test). |
+| ``--full-check`` | Check all discovered GET parameters as POST parameters as well. |
+| `--get-only` | Only scan and crawl GET parameters. |
+| `--post-only` | Only scan and crawl POST parameters. |
+**Payload Options**
+| `-c, --custom-chars` | Custom characters to test (e.g., `"<>'"`). |
+| `--force` | Only report as vulnerable if ALL injected characters are reflected. |
+| `--waf-bypass` | Test characters one-by-one to detect WAF blocking logic. |
 
-## 📝 Example Output
-```bash
-[INFO] Starting scan on 1 URLs...
-[INFO] Testing param 'q' on: https://example.com/search.php?q=hackedxss...
-[VULN] Potential XSS Found on param 'q': https://example.com/search.php... (Reflected: "><)
-[+] Scan completed.
-```
+## 📝 Output Formats
+RefleXSS generates different files based on the request method:
+- **Standard Output (`-o`):** Simple list of URLs:
+   - GET: ``https://site.com?q=test``
+   - POST: ``https://site.com/login | PostParam: user``
+- **Context Output (-oc):** Detailed analysis:
+   - ``https://site.com?q=test | Param: q | Reflected [GET]: "< | Method: GET``
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
