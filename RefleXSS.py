@@ -10,7 +10,7 @@ import ssl
 import warnings
 import os
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode, urlunparse
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, MarkupResemblesLocatorWarning
 from colorama import Fore, Style, init
 
 # Initialize Colorama
@@ -18,6 +18,8 @@ init(autoreset=True)
 
 # Suppress XML parsing warnings
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+# Suppress MarkupResemblesLocatorWarning 
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 # Configuration
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
