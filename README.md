@@ -62,7 +62,7 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 - **Full Check with Raw:** Test the method in the file, then automatically swap (GET to POST / POST to GET) to find hidden vulnerabilities:
   ```bash
   python RefleXSS.py -r request.txt --full-check
-**7. **Custom Headers**
+**7. Custom Headers**
 - Add your own headers. Use ;; as a separator to avoid conflicts with Cookie values:
   ```bash
   python RefleXSS.py -u "URL" --custom-headers "Authorization: Bearer token;;X-Custom: value"
