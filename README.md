@@ -21,8 +21,8 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/ghoxtbyte/RefleXSS.git
-   cd RefleXSS
+   git clone https://github.com/ghoxtbyte/refleXSS.git
+   cd refleXSS
 2. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
@@ -32,40 +32,40 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 **1. Basic Scan**
 * Scan a single URL. The tool will inject payloads into the `q` parameter:
   ```bash
-  python RefleXSS.py -u "https://example.com/search.php?q=test"
+  python reflexss.py -u "https://example.com/search.php?q=test"
 **2. Crawling & Scanning**
 * Crawl a domain (depth 2), extract all links and forms, and scan them:
   ```bash
-  python RefleXSS.py -uC "https://example.com"
+  python reflexss.py -uC "https://example.com"
 * **Raw Crawl (`-rC`):** Extract Cookies/Headers from a raw file and use them to crawl/scan authorized areas:
   ```bash
-  python RefleXSS.py -rC request.txt
+  python reflexss.py -rC request.txt
 **3. POST Request Scanning**
 * **Manual POST:** Scan a specific endpoint with POST data:
   ```bash
-  python RefleXSS.py -u "https://example.com/login" --post --data "user=test&pass=123"
+  python reflexss.py -u "https://example.com/login" --post --data "user=test&pass=123"
 * **Full Check (GET + POST):** Scan GET parameters normally, but also attempt to send them as POST requests:
   ```bash
-  python RefleXSS.py -l urls.txt --full-check -s -v --timeout 3 -oc result.txt
+  python reflexss.py -l urls.txt --full-check -s -v --timeout 3 -oc result.txt
 **4. WAF Bypass Mode**
 * If a WAF is blocking requests, use this mode to see exactly which characters cause a 403 or get filtered:
   ```bash
-  python RefleXSS.py -u "https://example.com/search?q=test" --waf-bypass
+  python reflexss.py -u "https://example.com/search?q=test" --waf-bypass
 **5. Advanced Filtering**
 * Only scan POST parameters found during a crawl, and save the output.
   ```bash
-  python RefleXSS.py -uC "https://example.com" -c '"<>' --force --post-only -o vulns.txt
+  python reflexss.py -uC "https://example.com" -c '"<>' --force --post-only -o vulns.txt
 **6. Raw Request Scanning (Burp Suite Style)**
 - Scan a saved raw HTTP request. It automatically detects the method (GET/POST) and parameters:
   ```bash
-  python RefleXSS.py -r request.txt
+  python reflexss.py -r request.txt
 - **Full Check with Raw:** Test the method in the file, then automatically swap (GET to POST / POST to GET) to find hidden vulnerabilities:
   ```bash
-  python RefleXSS.py -r request.txt --full-check
+  python reflexss.py -r request.txt --full-check
 **7. Custom Headers**
 - Add your own headers. Use ;; as a separator to avoid conflicts with Cookie values:
   ```bash
-  python RefleXSS.py -u "URL" --custom-headers "Authorization: Bearer token;;X-Custom: value"
+  python reflexss.py -u "URL" --custom-headers "Authorization: Bearer token;;X-Custom: value"
   
 ## ⚙️ Arguments
 
