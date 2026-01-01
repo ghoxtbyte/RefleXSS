@@ -21,8 +21,8 @@ It supports deep crawling, detecting forms/inputs for POST vulnerabilities, WAF 
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/ghoxtbyte/refleXSS.git
-   cd refleXSS
+   git clone https://github.com/ghoxtbyte/reflexss.git
+   cd reflexss
 2. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
