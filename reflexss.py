@@ -268,8 +268,17 @@ class AsyncXSSScanner:
                             if not redirect_location:
                                 return response.status, str(response.url), await response.text(errors='ignore')
                             
-                            # Critical: urljoin handles ports correctly if current_url has them
-                            current_url = urljoin(current_url, redirect_location)
+                            # Robust Redirect Handling
+                            # 1. Join URL to handle relative paths correctly
+                            next_url = urljoin(current_url, redirect_location)
+                            
+                            # 2. Safety Check: Ensure we stay on HTTP/HTTPS 
+                            # (Prevents redirecting to javascript: or data: which can cause issues)
+                            parsed_next = urlparse(next_url)
+                            if parsed_next.scheme not in ('http', 'https'):
+                                return response.status, str(response.url), await response.text(errors='ignore')
+
+                            current_url = next_url
                             redirect_count += 1
                             
                             if response.status == 303:
@@ -634,7 +643,8 @@ class AsyncXSSScanner:
         results = list(scan_targets)
         
         if depth > 0 and next_crawl_targets:
-            limited_targets = list(next_crawl_targets)[:20] 
+            # Allow full crawling of all targets
+            limited_targets = list(next_crawl_targets)
             tasks = [self.crawl_and_extract(session, target, depth - 1) for target in limited_targets]
             sub_results = await asyncio.gather(*tasks)
             for sub_res in sub_results:
