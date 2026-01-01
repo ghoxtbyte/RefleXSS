@@ -385,6 +385,26 @@ class AsyncXSSScanner:
         except:
             return ""
 
+    def is_subdomain_or_related(self, base, link):
+        """
+        Checks if the link domain is a subdomain of base, or vice versa (related FQDN).
+        """
+        base = base.lower()
+        link = link.lower()
+        
+        if base == link:
+            return True
+        
+        # Check if link is a subdomain of base (e.g., found 'sub.example.com' while on 'example.com')
+        if link.endswith("." + base):
+            return True
+            
+        # Check if base is a subdomain of link (e.g., found 'example.com' while on 'sub.example.com')
+        if base.endswith("." + link):
+            return True
+            
+        return False
+
     async def extract_from_raw_content(self, content, source_url):
         extracted_links = set()
         
@@ -549,8 +569,9 @@ class AsyncXSSScanner:
                 if asset_url in js_scanned_files or asset_url in crawled_urls:
                     continue
                 
-                # Check Scope (Cross-port allowed)
-                if self.get_base_domain_name(asset_url) != base_domain_root:
+                # Check Scope (Subdomains Allowed)
+                asset_domain = self.get_base_domain_name(asset_url)
+                if not self.is_subdomain_or_related(base_domain_root, asset_domain):
                      continue
 
                 js_scanned_files.add(asset_url)
@@ -579,9 +600,10 @@ class AsyncXSSScanner:
                 full_url = urljoin(final_url, raw_link)
                 parsed = urlparse(full_url)
                 
-                # Check Scope
+                # Check Scope (Subdomains and FQDNs related to base domain are now allowed)
                 link_domain_root = self.get_base_domain_name(full_url)
-                if link_domain_root != base_domain_root:
+                
+                if not self.is_subdomain_or_related(base_domain_root, link_domain_root):
                     continue
 
                 path_lower_link = parsed.path.lower()
